@@ -1,0 +1,72 @@
+{
+  "name": "dsh-plugin-quota",
+  "version": "0.1.0",
+  "description": "实时用量仪表：会话级 token/轮次/估算花费实时追踪，注入系统提示 + /qm 面板 + quota_meter 卡片；也是家族通用插件开发测试模板（events/commands/tools/section/presentation 全覆盖）。",
+  "type": "module",
+  "license": "MIT",
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json",
+    "./locale/*": "./locale/*",
+    "./icon.svg": "./icon.svg"
+  },
+  "files": [
+    "lib",
+    "src",
+    "locale",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "quota",
+    "tokens",
+    "meter",
+    "realtime"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/121212165/dsh-plugin-quota.git"
+  },
+  "sideEffects": false,
+  "icon": "./icon.svg",
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-base": "^0.1.2-alpha.4",
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "@deepseek-ai/dsh-tools": "^0.1.2-alpha.4",
+    "@types/node": "^26.6.2",
+    "typescript": "^7.0.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0"
+  },
+  "bugs": {
+    "url": "https://github.com/121212165/dsh-plugin-quota/issues"
+  }
+}

@@ -1,0 +1,15 @@
+# Mounts quota into a dsh profile.
+- insert:
+    - id: quota
+      name: dsh-plugin-quota
+      config:
+        enabled: true
+        budgetTokens: 0   # per-session token budget, 0 = no gauge bar
+        inject: true      # inject the live meter line into the system prompt
+        prices:
+          - match: space-bunny
+            currency: USD
+            perMillion: { input: 1, output: 2, cacheRead: 0.1 }
+          - match: deepseek
+            currency: CNY
+            perMillion: { input: 2, output: 8, cacheRead: 0.4 }
