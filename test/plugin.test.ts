@@ -178,3 +178,105 @@ test('history reloads across a remount, dropping corrupt and out-of-range entrie
   store.saveHistory({ 'session-round': [{ input: 5, output: 6, cacheRead: 7 }] });
   assert.deepEqual(store.loadHistory()['session-round'], [{ input: 5, output: 6, cacheRead: 7 }]);
 });
+
+/** the 128k row is the only place a fill point can come from: dsh shows no catalogue */
+const windowedPrices = [{ ...prices[0]!, contextWindow: 128_000 }];
+
+test('a non-positive or non-finite prices[].contextWindow fails startup naming quota', async () => {
+  for (const contextWindow of [0, -128_000, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const bad = makeHarness();
+    await assert.rejects(bad.apply({ prices: [{ ...prices[0]!, contextWindow }] }), /quota: prices\[\]\.contextWindow/);
+  }
+  const ok = await mounted({ prices: windowedPrices });
+  assert.equal(ok.commands.length, 2, 'a sane contextWindow mounts normally');
+});
+
+test('/qm projects the fill point and the budget burn-out under the forecast line', async () => {
+  const harness = await mounted({ prices: windowedPrices, budgetTokens: 100_000 });
+  harness.setCurrentSession('session-abc');
+  for (const step of series) harness.emitUsage('session-abc', 'stealth/space-bunny-alpha', step);
+
+  const panel = harness.command('qm').handler({}).text;
+  const lines = panel.split('\n');
+  const at = lines.findIndex((line) => line.startsWith('下步预估'));
+  assert.ok(at >= 0, panel);
+  // median slope 3.5k/step over prompts 16k, 21.5k, 25k, 27.5k; 53k of a 100k budget
+  assert.equal(lines[at + 1], '撑满预测：按当前增速，第 33 步（再 29 步）撑满 128k 上下文 · 建议在那之前 /compact 或换会话');
+  assert.equal(lines[at + 2], '预算预测：按当前增速，再 14 步烧到 100k（已用 53%）');
+  assert.ok(!panel.includes('Infinity') && !panel.includes('NaN'), panel);
+
+  const toolText = await harness.tool('quota_meter').execute({});
+  assert.ok(toolText.includes('撑满预测：按当前增速，第 33 步'), toolText);
+  assert.ok(toolText.includes('预算预测：按当前增速，再 14 步'), toolText);
+
+  // the same two numbers go out on the cross-plugin contract, nothing old goes missing
+  const summary = JSON.parse(readFileSync(join(dirname(harness.dataPath), 'summary.json'), 'utf8'));
+  assert.deepEqual(
+    Object.keys(summary).filter((key: string) => !['contextWindow', 'stepsUntilFull', 'stepsUntilBudget'].includes(key)),
+    ['updatedAt', 'currency', 'budgetTokens', 'maxSessionTokens', 'maxSessionRatio', 'nextTurnEstTokens', 'todayTokens', 'todayCostMicros', 'sessions'],
+  );
+  assert.equal(summary.nextTurnEstTokens, 29_825, 'the pre-existing fields keep their meaning');
+  assert.equal(summary.maxSessionRatio, 0.53);
+  assert.equal(summary.contextWindow, 128_000);
+  assert.equal(summary.stepsUntilFull, 29);
+  assert.equal(summary.stepsUntilBudget, 14);
+});
+
+test('an unconfigured contextWindow says so plainly instead of guessing a step', async () => {
+  const blind = await mounted({ budgetTokens: 100_000 });
+  blind.setCurrentSession('session-abc');
+  for (const step of series) blind.emitUsage('session-abc', 'stealth/space-bunny-alpha', step);
+  const panel = blind.command('qm').handler({}).text;
+  assert.ok(panel.includes('撑满预测：未配置该模型的 contextWindow，算不出撑满点'), panel);
+  assert.ok(!panel.includes('撑满预测：按当前增速'), 'no invented step index');
+
+  // a model no price row matched has no window either — the row is the only source
+  const stranger = await mounted({ prices: windowedPrices });
+  stranger.setCurrentSession('session-abc');
+  for (const step of series) stranger.emitUsage('session-abc', 'mystery/model', step);
+  const strangerPanel = stranger.command('qm').handler({}).text;
+  assert.ok(strangerPanel.includes('撑满预测：未配置该模型的 contextWindow'), strangerPanel);
+});
+
+test('the panel admits there is nothing to project, and when the window is already full', async () => {
+  const harness = await mounted({ prices: windowedPrices, budgetTokens: 100_000 });
+  harness.setCurrentSession('session-abc');
+  const flatStep = { inputTokens: 10_000, outputTokens: 1_000, cacheReadTokens: 5_000 };
+  harness.emitUsage('session-abc', 'stealth/space-bunny-alpha', flatStep);
+  harness.emitUsage('session-abc', 'stealth/space-bunny-alpha', flatStep);
+
+  const panel = harness.command('qm').handler({}).text;
+  assert.ok(panel.includes('撑满预测：~16k/128k · 看不到撑满的迹象（增速 ≤ 0）'), panel);
+  assert.ok(panel.includes('预算预测：~22k/100k · 看不到烧穿的迹象（增速 ≤ 0）'), panel);
+  assert.ok(!panel.includes('Infinity') && !panel.includes('NaN'), panel);
+
+  // one step in: the slope itself is not observable yet
+  const fresh = await mounted({ prices: windowedPrices });
+  fresh.setCurrentSession('session-def');
+  fresh.emitUsage('session-def', 'stealth/space-bunny-alpha', flatStep);
+  const freshPanel = fresh.command('qm').handler({}).text;
+  assert.ok(freshPanel.includes('只有 1 步，还看不出增速'), freshPanel);
+
+  // already past a small window: it says so now, not "in N steps"
+  const past = await mounted({ prices: [{ ...prices[0]!, contextWindow: 20_000 }] });
+  past.setCurrentSession('session-ghi');
+  for (const step of series) past.emitUsage('session-ghi', 'stealth/space-bunny-alpha', step);
+  const pastPanel = past.command('qm').handler({}).text;
+  assert.ok(pastPanel.includes('撑满预测：~28k 已顶到 20k 上限 · 立刻 /compact 或换会话'), pastPanel);
+  assert.ok(!pastPanel.includes('Infinity') && !pastPanel.includes('NaN'), pastPanel);
+});
+
+test('the injected section stays byte-identical while the projections grow', async () => {
+  const harness = await mounted({ prices: windowedPrices, budgetTokens: 100_000 });
+  harness.setCurrentSession('session-abc');
+  for (const step of series) harness.emitUsage('session-abc', 'stealth/space-bunny-alpha', step);
+
+  assert.equal(
+    harness.sectionText(),
+    '实时用量：53k tok / 100k ▰▰▰▰▱▱▱▱ · 4 步 · ≈0.064 USD（/qm 详情）',
+    'the section rides on every turn: growing it costs tokens and drifts the prefix',
+  );
+  const section = harness.sectionText();
+  assert.equal(section.split('\n').length, 1);
+  assert.ok(!section.includes('撑满') && !section.includes('预算预测'));
+});

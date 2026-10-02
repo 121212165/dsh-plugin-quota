@@ -12,9 +12,14 @@ import {
   presentCallCard,
   presentResultCard,
   priceFor,
+  projectBudget,
+  projectWindow,
+  promptGrowth,
+  renderBudgetLine,
   renderCompactLine,
   renderForecastLine,
   renderMeter,
+  renderWindowLine,
   stepOf,
   summarise,
   TOOL_SLACK,
@@ -211,4 +216,121 @@ test('the result card carries the forecast into its title and its body', () => {
   assert.ok(withForecast.content![0]!.text.includes('下步预估'), withForecast.content![0]!.text);
   // the old two-argument call still renders exactly as before
   assert.ok(!presentResultCard(totals, { prices }).title.includes('下步'));
+});
+
+/** A projection line is a number the model will act on: one Infinity or NaN in it is
+ * a broken sentence, so every line rendered below is checked for both. */
+function sane(line: string): string {
+  assert.ok(!line.includes('Infinity'), line);
+  assert.ok(!line.includes('NaN'), line);
+  assert.equal(line.split('\n').length, 1, line);
+  return line;
+}
+
+/** prompt per step: 1.5k, 2k, 2.5k, 12.5k, 13k, 13.5k — one 10× tool-result jump. */
+const climbing: StepUsage[] = [
+  { input: 1_000, output: 500, cacheRead: 0 },
+  { input: 1_500, output: 500, cacheRead: 0 },
+  { input: 2_000, output: 500, cacheRead: 0 },
+  { input: 12_000, output: 500, cacheRead: 0 },
+  { input: 12_500, output: 500, cacheRead: 0 },
+  { input: 13_000, output: 500, cacheRead: 0 },
+];
+
+const flat: StepUsage[] = [
+  { input: 1_000, output: 500, cacheRead: 0 },
+  { input: 1_000, output: 500, cacheRead: 0 },
+  { input: 1_000, output: 500, cacheRead: 0 },
+];
+
+test('promptGrowth takes the median delta: one giant tool result is not a trend', () => {
+  assert.equal(promptGrowth([]), 0);
+  assert.equal(promptGrowth([climbing[0]!]), 0, 'one step has no delta to take a slope from');
+  assert.equal(promptGrowth(climbing), 500, 'deltas 500,500,10000,500,500 → median 500, the mean would say 2400');
+  assert.equal(promptGrowth([climbing[0]!, { input: 500, output: 500, cacheRead: 0 }]), -500, 'a shrinking session reports a negative slope');
+  assert.equal(promptGrowth([climbing[0]!, { input: Number.NaN, output: 1, cacheRead: 1 }, climbing[1]!]), 500, 'unreadable steps drop out');
+});
+
+test('projectWindow reads the fill point off the observed slope', () => {
+  const full = projectWindow(climbing, 20_000);
+  assert.equal(full.promptNow, 13_500);
+  assert.equal(full.growthPerStep, 500);
+  assert.equal(full.basis, 6);
+  assert.equal(full.willGrow, true);
+  assert.equal(full.stepsToFull, 13, '(20000-13500)/500 — the median slope, not the outlier-driven mean of 3');
+  assert.equal(full.fullAtStep, 19, 'observed steps plus the remaining ones');
+  assert.equal(projectWindow(climbing, 20_000, 66).fullAtStep, 79, 'a trimmed history must not shift the step index');
+
+  const already = projectWindow(climbing, 10_000);
+  assert.equal(already.stepsToFull, 0, 'already past the limit is zero steps, not a negative count');
+  assert.equal(already.fullAtStep, 6);
+
+  // nothing to project from: flat, shrinking, one step, no steps, no usable contextWindow
+  assert.deepEqual(projectWindow(flat, 20_000), { promptNow: 1_500, growthPerStep: 0, stepsToFull: null, fullAtStep: null, willGrow: false, basis: 3 });
+  assert.deepEqual(projectWindow(climbing.slice(0, 1), 20_000), { promptNow: 1_500, growthPerStep: 0, stepsToFull: null, fullAtStep: null, willGrow: false, basis: 1 });
+  assert.deepEqual(projectWindow([], 20_000), { promptNow: 0, growthPerStep: 0, stepsToFull: null, fullAtStep: null, willGrow: false, basis: 0 });
+  assert.deepEqual(projectWindow(climbing, 0), { promptNow: 13_500, growthPerStep: 500, stepsToFull: null, fullAtStep: null, willGrow: true, basis: 6 }, 'no contextWindow, no fill point');
+  assert.equal(projectWindow(climbing, -20_000).stepsToFull, null);
+  assert.equal(projectWindow(climbing, Number.NaN).stepsToFull, null);
+  assert.equal(projectWindow([{ input: 1_000, output: 500, cacheRead: 0 }, { input: 800, output: 500, cacheRead: 0 }], 20_000).stepsToFull, null, 'declining: it will never fill');
+});
+
+test('projectBudget counts the steps still inside budgetTokens', () => {
+  assert.deepEqual(projectBudget(53_000, 100_000, 3_500), { totalUsed: 53_000, budgetTokens: 100_000, stepsLeft: 14, ratio: 0.53 });
+  assert.deepEqual(projectBudget(120_000, 100_000, 3_500), { totalUsed: 120_000, budgetTokens: 100_000, stepsLeft: 0, ratio: 1.2 }, 'already crossed');
+  assert.equal(projectBudget(1_000, 100_000, 0).stepsLeft, null, 'a session that is not growing never burns out');
+  assert.equal(projectBudget(1_000, 100_000, -500).stepsLeft, null);
+  assert.deepEqual(projectBudget(1_000, 0, 500), { totalUsed: 1_000, budgetTokens: 0, stepsLeft: null, ratio: null }, 'no budget configured');
+  assert.equal(projectBudget(1_000, Number.NaN, 500).ratio, null);
+});
+
+test('renderWindowLine states a fill point, or says plainly that there is none', () => {
+  const missing = '撑满预测：未配置该模型的 contextWindow，算不出撑满点';
+  assert.equal(sane(renderWindowLine(null, null)), missing);
+  for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.equal(renderWindowLine(projectWindow(climbing, 20_000), bad), missing);
+  }
+  assert.equal(sane(renderWindowLine(projectWindow([], 20_000), 20_000)), '撑满预测：还没有已完成的步（跑完一步再来看）');
+  assert.equal(
+    sane(renderWindowLine(projectWindow(climbing, 20_000), 20_000)),
+    '撑满预测：按当前增速，第 19 步（再 13 步）撑满 20k 上下文 · 建议在那之前 /compact 或换会话',
+  );
+  assert.equal(sane(renderWindowLine(projectWindow(climbing, 10_000), 10_000)), '撑满预测：~14k 已顶到 10k 上限 · 立刻 /compact 或换会话');
+  assert.ok(sane(renderWindowLine(projectWindow(climbing.slice(0, 1), 20_000), 20_000)).includes('还看不出增速'));
+  assert.ok(sane(renderWindowLine(projectWindow(flat, 20_000), 20_000)).includes('看不到撑满的迹象'));
+  // a one-token slope against a 128k window must still print whole step counts, not 128k/1
+  assert.ok(sane(renderWindowLine(projectWindow([{ input: 0, output: 0, cacheRead: 0 }, { input: 1, output: 0, cacheRead: 0 }], 128_000), 128_000)).includes('第 128001 步（再 127999 步）'));
+});
+
+test('renderBudgetLine never divides by a zero slope and never hides a missing budget', () => {
+  assert.equal(sane(renderBudgetLine(projectBudget(0, 0, 0))), '预算预测：未配置 budgetTokens，没有预算可烧');
+  assert.equal(sane(renderBudgetLine(projectBudget(53_000, 100_000, 3_500))), '预算预测：按当前增速，再 14 步烧到 100k（已用 53%）');
+  assert.ok(sane(renderBudgetLine(projectBudget(120_000, 100_000, 3_500))).includes('已烧穿'));
+  assert.ok(sane(renderBudgetLine(projectBudget(1_000, 100_000, 0))).includes('看不到烧穿的迹象'));
+});
+
+test('summarise adds the projections without touching the published fields', () => {
+  const OLD_KEYS = ['updatedAt', 'currency', 'budgetTokens', 'maxSessionTokens', 'maxSessionRatio', 'nextTurnEstTokens', 'todayTokens', 'todayCostMicros', 'sessions'];
+  const hot = { ...emptyTotals(), inputTokens: 40_000, outputTokens: 5_000 };
+  const forecast = predictNextTurn(climbing, null);
+  const summary = summarise({
+    sessions: [hot],
+    today: { ...emptyTotals(), inputTokens: 40_000, outputTokens: 5_000, costMicros: 1_200 },
+    budgetTokens: 100_000,
+    forecast,
+    currency: 'USD',
+    now: new Date('2026-10-02T09:00:00Z'),
+    contextWindow: 20_000,
+    stepsUntilFull: 13,
+    stepsUntilBudget: 14,
+  });
+  for (const key of OLD_KEYS) assert.ok(key in summary, `${key} is another plugin's contract, it cannot disappear`);
+  assert.deepEqual(Object.keys(summary).filter((key) => !OLD_KEYS.includes(key)).sort(), ['contextWindow', 'stepsUntilBudget', 'stepsUntilFull']);
+  assert.equal(summary.contextWindow, 20_000);
+  assert.equal(summary.stepsUntilFull, 13);
+  assert.equal(summary.stepsUntilBudget, 14);
+  assert.equal(summary.nextTurnEstTokens, forecast!.promptEst);
+
+  const cold = summarise({ sessions: [], today: emptyTotals(), budgetTokens: 0, forecast: null });
+  assert.deepEqual([cold.contextWindow, cold.stepsUntilFull, cold.stepsUntilBudget], [null, null, null], 'unconfigured publishes null, never a guess');
 });

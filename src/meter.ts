@@ -44,6 +44,9 @@ export interface PriceRow {
   match: string;
   currency: string;
   perMillion: { input: number; output: number; cacheRead: number };
+  /** the model's context window, needed for the fill-point projection. dsh exposes no
+   * model catalogue to plugins, so this is the only source; absent = no projection. */
+  contextWindow?: number;
 }
 
 export function priceFor(rows: PriceRow[], modelId: string): PriceRow | null {
@@ -156,11 +159,14 @@ export function percentile(values: readonly number[], q: number): number {
   return sorted[rank - 1]!;
 }
 
+const usableSteps = (history: readonly StepUsage[]): StepUsage[] =>
+  history.filter((step) => step && Number.isFinite(step.input) && Number.isFinite(step.output) && Number.isFinite(step.cacheRead));
+
 /** Next-step estimate from the step history: the prefix grows by what the model
  * just wrote, the cached part stays cached, output is the session's own spread.
  * Null with no history — a forecast invented before the first step is a lie. */
 export function predictNextTurn(history: readonly StepUsage[], price: PriceRow | null): TurnForecast | null {
-  const steps = history.filter((step) => step && Number.isFinite(step.input) && Number.isFinite(step.output) && Number.isFinite(step.cacheRead));
+  const steps = usableSteps(history);
   if (!steps.length) return null;
   const last = steps[steps.length - 1]!;
   const inputEst = Math.round((last.input + last.output) * (1 + TOOL_SLACK));
@@ -194,6 +200,92 @@ export function renderForecastLine(forecast: TurnForecast | null): string {
   return `下步预估：新输入 ~${compactTokens(forecast.inputEst)}${cachePart}（提示词 ~${compactTokens(forecast.promptEst)}） · 输出 ${outputs}（P50–P85，${forecast.basis} 步为据）${money}`;
 }
 
+/** What the model saw at one step: the uncached delta, the reused prefix, and what
+ * it wrote back — which is the bulk of the *next* step's prompt. */
+const promptOf = (step: StepUsage): number => step.input + step.cacheRead + step.output;
+
+/** Median step-to-step prompt growth: a single huge tool result must not fake the
+ * slope, so the middle delta wins and the mean never does. 0 below two steps. */
+export function promptGrowth(history: readonly StepUsage[]): number {
+  const steps = usableSteps(history);
+  if (steps.length < 2) return 0;
+  return percentile(steps.slice(1).map((step, index) => promptOf(step) - promptOf(steps[index]!)), 0.5);
+}
+
+export interface WindowProjection {
+  /** prompt tokens in front of the model at the last observed step */
+  promptNow: number;
+  growthPerStep: number;
+  /** more steps before promptNow reaches contextWindow; null = no honest fill point */
+  stepsToFull: number | null;
+  /** session step index where it fills; null with no fill point */
+  fullAtStep: number | null;
+  /** false for a flat or shrinking session — those never fill up */
+  willGrow: boolean;
+  /** steps behind the reading; under 2 the slope is not observable yet */
+  basis: number;
+}
+
+/** When does this session's context window fill up? `observedSteps` is the session's
+ * true step count when the retained history is shorter than the session (history is
+ * capped per session), so the printed index is not off by the trim. */
+export function projectWindow(history: readonly StepUsage[], contextWindow: number, observedSteps?: number): WindowProjection {
+  const steps = usableSteps(history);
+  const promptNow = steps.length ? promptOf(steps[steps.length - 1]!) : 0;
+  const growthPerStep = promptGrowth(steps);
+  const willGrow = growthPerStep > 0;
+  const usable = Number.isFinite(contextWindow) && contextWindow > 0;
+  let stepsToFull: number | null = null;
+  if (usable && promptNow >= contextWindow) stepsToFull = 0;
+  else if (usable && willGrow) stepsToFull = Math.ceil((contextWindow - promptNow) / growthPerStep);
+  const at = Math.max(steps.length, observedSteps ?? 0);
+  return { promptNow, growthPerStep, stepsToFull, fullAtStep: stepsToFull === null ? null : at + stepsToFull, willGrow, basis: steps.length };
+}
+
+export interface BudgetProjection {
+  totalUsed: number;
+  budgetTokens: number;
+  /** steps until cumulative usage crosses the budget; null = no budget or no growth,
+   * 0 = already crossed */
+  stepsLeft: number | null;
+  /** used/budget; null when there is no budget, so no ratio exists to report */
+  ratio: number | null;
+}
+
+/** How many steps of this session's own growth still fit in `budgetTokens`. */
+export function projectBudget(totalUsed: number, budgetTokens: number, growthPerStep: number): BudgetProjection {
+  if (!Number.isFinite(budgetTokens) || budgetTokens <= 0) return { totalUsed, budgetTokens, stepsLeft: null, ratio: null };
+  const remaining = budgetTokens - totalUsed;
+  const stepsLeft = remaining <= 0 ? 0 : growthPerStep > 0 ? Math.ceil(remaining / growthPerStep) : null;
+  return { totalUsed, budgetTokens, stepsLeft, ratio: totalUsed / budgetTokens };
+}
+
+/** Panel line: the step at which this session runs out of context. */
+export function renderWindowLine(projection: WindowProjection | null, contextWindow: number | null): string {
+  const head = '撑满预测：';
+  if (!contextWindow || !Number.isFinite(contextWindow) || contextWindow <= 0) return `${head}未配置该模型的 contextWindow，算不出撑满点`;
+  if (!projection || projection.basis === 0) return `${head}还没有已完成的步（跑完一步再来看）`;
+  const limit = compactTokens(contextWindow);
+  const now = `~${compactTokens(projection.promptNow)}/${limit}`;
+  if (projection.stepsToFull === 0) return `${head}~${compactTokens(projection.promptNow)} 已顶到 ${limit} 上限 · 立刻 /compact 或换会话`;
+  if (projection.stepsToFull === null) {
+    return projection.basis < 2
+      ? `${head}${now} · 只有 1 步，还看不出增速`
+      : `${head}${now} · 看不到撑满的迹象（增速 ≤ 0）`;
+  }
+  return `${head}按当前增速，第 ${projection.fullAtStep} 步（再 ${projection.stepsToFull} 步）撑满 ${limit} 上下文 · 建议在那之前 /compact 或换会话`;
+}
+
+/** Panel line: the step at which this session runs out of budget. */
+export function renderBudgetLine(budget: BudgetProjection): string {
+  const head = '预算预测：';
+  if (budget.ratio === null) return `${head}未配置 budgetTokens，没有预算可烧`;
+  const used = `已用 ${Math.round(budget.ratio * 100)}%`;
+  if (budget.stepsLeft === 0) return `${head}⚠ 已烧穿 ${compactTokens(budget.budgetTokens)} 预算（${used}）· 该收尾了`;
+  if (budget.stepsLeft === null) return `${head}~${compactTokens(budget.totalUsed)}/${compactTokens(budget.budgetTokens)} · 看不到烧穿的迹象（增速 ≤ 0）`;
+  return `${head}按当前增速，再 ${budget.stepsLeft} 步烧到 ${compactTokens(budget.budgetTokens)}（${used}）`;
+}
+
 /** The published budget contract. Other plugins read `summary.json` instead of
  * digging through session-keyed `totals.json`, so a per-session uuid layout stays
  * an internal detail of quota. */
@@ -207,6 +299,14 @@ export interface QuotaSummary {
   maxSessionRatio: number | null;
   /** next-step prompt estimate for the session that is currently running */
   nextTurnEstTokens: number | null;
+  /** running session's model context window, null when unconfigured. These three are
+   * append-only to `summary.json` — task-forge and ide-hub read it, so nothing existing
+   * here may be renamed or redefined, only added. */
+  contextWindow: number | null;
+  /** steps until the running session fills that window, null = no fill point */
+  stepsUntilFull: number | null;
+  /** steps until the running session crosses budgetTokens, null = no budget */
+  stepsUntilBudget: number | null;
   todayTokens: number;
   todayCostMicros: number;
   sessions: number;
@@ -219,6 +319,9 @@ export function summarise(input: {
   forecast: TurnForecast | null;
   currency?: string;
   now?: Date;
+  contextWindow?: number | null;
+  stepsUntilFull?: number | null;
+  stepsUntilBudget?: number | null;
 }): QuotaSummary {
   const used = input.sessions.map((totals) => totals.inputTokens + totals.outputTokens);
   const maxSessionTokens = used.length ? Math.max(...used) : 0;
@@ -230,6 +333,9 @@ export function summarise(input: {
     maxSessionTokens,
     maxSessionRatio: budgetTokens > 0 ? maxSessionTokens / budgetTokens : null,
     nextTurnEstTokens: input.forecast ? input.forecast.promptEst : null,
+    contextWindow: input.contextWindow ?? null,
+    stepsUntilFull: input.stepsUntilFull ?? null,
+    stepsUntilBudget: input.stepsUntilBudget ?? null,
     todayTokens: input.today.inputTokens + input.today.outputTokens,
     todayCostMicros: input.today.costMicros,
     sessions: input.sessions.length,

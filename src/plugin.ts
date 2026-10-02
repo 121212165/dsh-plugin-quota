@@ -4,6 +4,9 @@
  * One session/event listener folds every assistant/message usage into a live
  * per-session meter; a system-prompt section injects the current session's
  * gauge each turn; /qm renders the panel; quota_meter gives the agent a card.
+ * The panel and the tool also project where this session's context window fills and
+ * where its budget burns out; the injected one-liner grows by nothing, because it
+ * rides on every turn.
  * Every seam a family plugin touches appears here exactly once, with rich
  * presentation (presentCall/presentResult generic cards) as the display
  * reference. Methodology: dsh-tool-web's presentation hooks + cost-ledger's
@@ -26,9 +29,14 @@ import {
   presentCallCard,
   presentResultCard,
   priceFor,
+  projectBudget,
+  projectWindow,
+  promptGrowth,
+  renderBudgetLine,
   renderCompactLine,
   renderForecastLine,
   renderMeter,
+  renderWindowLine,
   stepOf,
   summarise,
   type PriceRow,
@@ -63,6 +71,7 @@ export const Config = Schema.object({
         output: Schema.number().default(0),
         cacheRead: Schema.number().default(0),
       }),
+      contextWindow: Schema.number().description('该模型的上下文窗口，撑满预测的根据；缺省则不算撑满点'),
     }),
   ).default([]),
 });
@@ -136,13 +145,20 @@ export function apply(ctx: Context, config: Config): void {
   if (!config.enabled) return void log.info('disabled by config');
   if (!Number.isFinite(config.budgetTokens) || config.budgetTokens < 0) throw new TypeError('quota: budgetTokens must be a non-negative finite number');
   if (config.budgetTokens > 0 && !Number.isInteger(config.budgetTokens)) throw new TypeError('quota: budgetTokens must be an integer when set');
+  for (const row of config.prices) {
+    const contextWindow = row.contextWindow;
+    if (contextWindow !== undefined && (!Number.isFinite(contextWindow) || contextWindow <= 0)) {
+      throw new TypeError(`quota: prices[].contextWindow must be a positive finite number (match=${row.match})`);
+    }
+  }
 
   const store = new MeterStore(config.dataPath);
   const sessions = new Map<string, UsageTotals>(Object.entries(store.load()));
   /** daily rollup keyed YYYY-MM-DD — session ids are uuids without dates, so
    * "today" cannot be derived by filtering session keys. */
   const daily = new Map<string, UsageTotals>();
-  /** per-session step history + last-seen model, both feed the next-turn forecast */
+  /** per-session step history + last-seen model: the basis for the next-turn forecast
+   * and for both session projections (fill point, budget burn-out) */
   const histories = new Map<string, StepUsage[]>(Object.entries(store.loadHistory()));
   const lastModel = new Map<string, string>();
   let dirty = 0;
@@ -194,10 +210,32 @@ export function apply(ctx: Context, config: Config): void {
   const forecastFor = (sessionId: string | undefined) =>
     predictNextTurn(sessionId === undefined ? [] : histories.get(sessionId) ?? [], sessionId === undefined ? null : priceFor(config.prices, lastModel.get(sessionId) ?? 'unknown'));
 
+  const usedOf = (totals: UsageTotals | undefined): number => totals ? totals.inputTokens + totals.outputTokens : 0;
+
+  /** dsh gives plugins no model catalogue, so the context window comes from config —
+   * the same price row that matched the model, or no fill point at all. */
+  const contextWindowOf = (sessionId: string | undefined): number | null =>
+    sessionId === undefined ? null : priceFor(config.prices, lastModel.get(sessionId) ?? 'unknown')?.contextWindow ?? null;
+
+  /** the two session projections: when the window fills, when the budget burns out */
+  const projectFor = (sessionId: string | undefined) => {
+    const history = sessionId === undefined ? [] : histories.get(sessionId) ?? [];
+    const contextWindow = contextWindowOf(sessionId);
+    const window = contextWindow === null ? null : projectWindow(history, contextWindow, sessionId === undefined ? 0 : sessions.get(sessionId)?.turns);
+    const budget = projectBudget(usedOf(sessionId === undefined ? undefined : sessions.get(sessionId)), config.budgetTokens, promptGrowth(history));
+    return { contextWindow, window, budget };
+  };
+
+  const projectionLines = (sessionId: string | undefined): string[] => {
+    const { contextWindow, window, budget } = projectFor(sessionId);
+    return [renderWindowLine(window, contextWindow), renderBudgetLine(budget)];
+  };
+
   /** Republish the budget contract every time the meter is flushed — other plugins
    * read summary.json without knowing session ids. */
   const publish = (): void => {
     const id = currentSessionId();
+    const { contextWindow, window, budget } = projectFor(id);
     const summary = summarise({
       sessions: [...sessions.values()],
       today: aggregateToday(),
@@ -205,6 +243,9 @@ export function apply(ctx: Context, config: Config): void {
       forecast: id === undefined ? null : forecastFor(id),
       currency: config.prices[0]?.currency,
       now: new Date(),
+      contextWindow,
+      stepsUntilFull: window?.stepsToFull ?? null,
+      stepsUntilBudget: budget.stepsLeft,
     });
     store.saveSummary(summary);
   };
@@ -251,7 +292,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.commands.register({
     name: 'qm',
-    description: '实时用量仪表：本会话 token/步数/估算花费，及今日全部会话合计',
+    description: '实时用量仪表：本会话 token/步数/估算花费、下步预估与撑满/烧穿预测，及今日全部会话合计',
     handler: () => {
       const lines: string[] = [];
       const id = currentSessionId();
@@ -259,10 +300,11 @@ export function apply(ctx: Context, config: Config): void {
       lines.push(renderMeter('▍ 本会话', current ?? emptyTotals(), options()));
       lines.push('');
       lines.push(renderForecastLine(current ? forecastFor(id) : null));
+      lines.push(...projectionLines(id));
       lines.push('');
       lines.push(renderMeter('▍ 今日全部', aggregateToday(), options()));
       if (config.budgetTokens > 0 && current) {
-        const used = current.inputTokens + current.outputTokens;
+        const used = usedOf(current);
         lines.push('');
         lines.push(used > config.budgetTokens ? `⚠ 已超出单会话预算 ${compactTokens(config.budgetTokens)}——收尾或 /qm-reset` : '');
       }
@@ -289,7 +331,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(
     defineTool({
       name: 'quota_meter',
-      description: '查看当前会话的实时 token 用量与估算花费。用户问"花了多少/还剩多少预算"或长任务开始前自查时用。',
+      description: '查看当前会话的实时 token 用量、估算花费，以及按当前增速第几步撑满上下文、第几步烧完预算。用户问"花了多少/还剩多少预算/还能跑几步"或长任务开始前自查时用。',
       parameters: {},
       output: {
         schema: { type: 'string' } as const,
@@ -305,7 +347,7 @@ export function apply(ctx: Context, config: Config): void {
         const id = currentSessionId();
         const totals = (id !== undefined ? sessions.get(id) : undefined) ?? aggregateAll();
         const forecast = id === undefined ? null : forecastFor(id);
-        return renderMeter('会话实时用量', totals, options()) + `\n${renderForecastLine(forecast)}`;
+        return [renderMeter('会话实时用量', totals, options()), renderForecastLine(forecast), ...projectionLines(id)].join('\n');
       },
     }),
   );
