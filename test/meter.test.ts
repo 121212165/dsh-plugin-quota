@@ -7,12 +7,19 @@ import {
   emptyTotals,
   formatMoney,
   gauge,
+  percentile,
+  predictNextTurn,
   presentCallCard,
   presentResultCard,
   priceFor,
   renderCompactLine,
+  renderForecastLine,
   renderMeter,
+  stepOf,
+  summarise,
+  TOOL_SLACK,
   type PriceRow,
+  type StepUsage,
 } from '../src/meter.ts';
 
 const prices: PriceRow[] = [
@@ -94,4 +101,114 @@ test('presentation cards carry the generic contract with a live title', () => {
   assert.ok(result.title.includes('13.8k tok') || result.title.includes('14k tok'), result.title);
   assert.ok(result.title.includes('0.017 USD'));
   assert.ok(result.rawInput.includes('会话实时用量'));
+});
+
+test('stepOf reads one assistant/message step, reasoning counted as output', () => {
+  assert.deepEqual(stepOf(usage), { input: 12_000, output: 1_800, cacheRead: 9_000 });
+  assert.deepEqual(stepOf({}), { input: 0, output: 0, cacheRead: 0 });
+  assert.deepEqual(stepOf({ inputTokens: -5, outputTokens: Number.NaN, cacheReadTokens: 1_000_000_000 }), { input: 0, output: 0, cacheRead: 1_000_000_000 });
+});
+
+test('percentile takes the nearest rank without mutating the input', () => {
+  const values = [400, 100, 300, 200];
+  assert.equal(percentile(values, 0.5), 200);
+  assert.equal(percentile(values, 0.85), 400);
+  assert.equal(percentile(values, 1), 400);
+  assert.deepEqual(values, [400, 100, 300, 200], 'the caller history stays in step order');
+  assert.equal(percentile([], 0.5), 0);
+  assert.equal(percentile([7], 0.85), 7);
+});
+
+test('predictNextTurn grows the prompt by what the model just wrote', () => {
+  const step: StepUsage = { input: 1_000, output: 500, cacheRead: 20_000 };
+  const one = predictNextTurn([step], priceFor(prices, 'deepseek-chat'));
+  assert.ok(one);
+  assert.equal(one.basis, 1);
+  assert.equal(one.inputEst, Math.round(1_500 * (1 + TOOL_SLACK)));
+  assert.equal(one.cacheReadEst, 20_000, 'the cached prefix is expected to hit again');
+  assert.equal(one.promptEst, one.inputEst + one.cacheReadEst);
+  assert.equal(one.outputP50, 500);
+  assert.equal(one.outputP85, 500);
+  // 1725*2 + 500*8 + 20000*0.4 micro-per-million
+  assert.equal(one.costP50Micros, 15_450);
+  assert.equal(one.costP85Micros, 15_450);
+  assert.equal(predictNextTurn([step], null)!.costP50Micros, 0, 'unpriced models forecast tokens without money');
+
+  const series: StepUsage[] = [
+    { input: 500, output: 100, cacheRead: 0 },
+    { input: 900, output: 200, cacheRead: 4_000 },
+    { input: 2_000, output: 300, cacheRead: 9_000 },
+    { input: 5_000, output: 400, cacheRead: 100_000 },
+  ];
+  const many = predictNextTurn(series, null)!;
+  assert.equal(many.basis, 4);
+  assert.equal(many.inputEst, Math.round(5_400 * 1.15));
+  assert.equal(many.cacheReadEst, 100_000);
+  assert.equal(many.outputP50, 200);
+  assert.equal(many.outputP85, 400);
+
+  // no history, or nothing usable in it, is no forecast at all
+  assert.equal(predictNextTurn([], null), null);
+  assert.equal(predictNextTurn([{ input: Number.NaN, output: 1, cacheRead: 1 }], null), null);
+});
+
+test('renderForecastLine refuses to invent a number, then prices the next step', () => {
+  const bare = renderForecastLine(null);
+  assert.ok(bare.includes('还没有已完成的步'), bare);
+  assert.equal(bare.split('\n').length, 1);
+
+  const forecast = predictNextTurn([{ input: 1_000, output: 500, cacheRead: 20_000 }], priceFor(prices, 'deepseek-chat'));
+  const line = renderForecastLine(forecast);
+  assert.equal(line.split('\n').length, 1);
+  assert.ok(line.includes('新输入 ~1.7k'), line);
+  assert.ok(line.includes('缓存复用 20k'), line);
+  assert.ok(line.includes('提示词 ~22k'), line);
+  assert.ok(line.includes('输出 500（P50–P85，1 步为据）'), line);
+  assert.ok(line.includes('≈0.015 CNY'), line);
+  assert.ok(!line.includes('–0.015'), line, 'a one-step forecast has no spread to print');
+
+  // money follows the row that matched the session model, never the first config row
+  const unpriced = predictNextTurn([{ input: 1_000, output: 500, cacheRead: 20_000 }], null);
+  assert.ok(renderForecastLine(unpriced).includes('新输入 ~1.7k'));
+  assert.ok(!renderForecastLine(unpriced).includes('CNY'), renderForecastLine(unpriced));
+  assert.ok(!renderForecastLine(unpriced).includes('USD'), renderForecastLine(unpriced));
+});
+
+test('summarise publishes the budget contract other plugins read', () => {
+  const hot = { ...emptyTotals(), inputTokens: 40_000, outputTokens: 5_000 };
+  const cool = { ...emptyTotals(), inputTokens: 1_000, outputTokens: 500 };
+  const forecast = predictNextTurn([{ input: 1_000, output: 500, cacheRead: 20_000 }], null);
+  const summary = summarise({
+    sessions: [cool, hot],
+    today: { ...emptyTotals(), inputTokens: 41_000, outputTokens: 5_500, costMicros: 9_900 },
+    budgetTokens: 50_000,
+    forecast,
+    currency: 'CNY',
+    now: new Date('2026-10-02T09:00:00Z'),
+  });
+  assert.equal(summary.updatedAt, '2026-10-02T09:00:00.000Z');
+  assert.equal(summary.sessions, 2);
+  assert.equal(summary.maxSessionTokens, 45_000);
+  assert.equal(summary.maxSessionRatio, 0.9);
+  assert.equal(summary.nextTurnEstTokens, forecast!.promptEst);
+  assert.equal(summary.todayTokens, 46_500);
+  assert.equal(summary.todayCostMicros, 9_900);
+  assert.equal(summary.currency, 'CNY');
+
+  // without a budget there is no ratio to report — consumers must not guess one
+  const noBudget = summarise({ sessions: [], today: emptyTotals(), budgetTokens: 0, forecast: null });
+  assert.equal(noBudget.maxSessionRatio, null);
+  assert.equal(noBudget.maxSessionTokens, 0);
+  assert.equal(noBudget.nextTurnEstTokens, null);
+  assert.equal(noBudget.currency, 'CNY', 'currency falls back, never undefined');
+});
+
+test('the result card carries the forecast into its title and its body', () => {
+  const totals = addUsage(emptyTotals(), usage);
+  const forecast = predictNextTurn([{ input: 1_000, output: 500, cacheRead: 20_000 }], null);
+  const withForecast = presentResultCard(totals, { prices }, forecast);
+  assert.ok(withForecast.title.includes('下步 ~22k'), withForecast.title);
+  assert.ok(withForecast.rawInput.includes('下步预估'), withForecast.rawInput);
+  // the old two-argument call still renders exactly as before
+  assert.ok(!presentResultCard(totals, { prices }).title.includes('下步'));
 });

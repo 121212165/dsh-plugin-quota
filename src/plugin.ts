@@ -22,13 +22,19 @@ import {
   compactTokens,
   costMicrosOf,
   emptyTotals,
+  predictNextTurn,
   presentCallCard,
   presentResultCard,
   priceFor,
   renderCompactLine,
+  renderForecastLine,
   renderMeter,
+  stepOf,
+  summarise,
   type PriceRow,
+  type QuotaSummary,
   type RawUsage,
+  type StepUsage,
   type UsageTotals,
 } from './meter.ts';
 
@@ -72,10 +78,24 @@ function writeAtomic(dest: string, content: string): void {
   renameSync(tmp, dest);
 }
 
+/** Per-session step history backs the next-turn forecast. It lives in its own file
+ * so `totals.json` stays the stable cross-plugin budget contract (task-forge reads it). */
+const HISTORY_LIMIT = 64;
+
+function isStep(value: unknown): value is StepUsage {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const step = value as Partial<StepUsage>;
+  return [step.input, step.output, step.cacheRead].every((n) => typeof n === 'number' && Number.isFinite(n) && n >= 0);
+}
+
 export class MeterStore {
   readonly path: string;
+  readonly historyPath: string;
+  readonly summaryPath: string;
   constructor(dataPath: string | undefined) {
     this.path = dataPath ? expandHome(dataPath) : join(homedir(), '.dsh', 'quota', 'totals.json');
+    this.historyPath = join(dirname(this.path), 'history.json');
+    this.summaryPath = join(dirname(this.path), 'summary.json');
   }
   load(): Record<string, UsageTotals> {
     if (!existsSync(this.path)) return {};
@@ -88,6 +108,26 @@ export class MeterStore {
   }
   save(sessions: Record<string, UsageTotals>): void {
     writeAtomic(this.path, JSON.stringify(sessions, null, 2) + '\n');
+  }
+  loadHistory(): Record<string, StepUsage[]> {
+    if (!existsSync(this.historyPath)) return {};
+    try {
+      const parsed = JSON.parse(readFileSync(this.historyPath, 'utf8'));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+      const out: Record<string, StepUsage[]> = {};
+      for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+        if (Array.isArray(value)) out[key] = value.filter(isStep).slice(-HISTORY_LIMIT);
+      }
+      return out;
+    } catch {
+      return {};
+    }
+  }
+  saveHistory(histories: Record<string, StepUsage[]>): void {
+    writeAtomic(this.historyPath, JSON.stringify(histories, null, 2) + '\n');
+  }
+  saveSummary(summary: QuotaSummary): void {
+    writeAtomic(this.summaryPath, JSON.stringify(summary, null, 2) + '\n');
   }
 }
 
@@ -102,6 +142,9 @@ export function apply(ctx: Context, config: Config): void {
   /** daily rollup keyed YYYY-MM-DD — session ids are uuids without dates, so
    * "today" cannot be derived by filtering session keys. */
   const daily = new Map<string, UsageTotals>();
+  /** per-session step history + last-seen model, both feed the next-turn forecast */
+  const histories = new Map<string, StepUsage[]>(Object.entries(store.loadHistory()));
+  const lastModel = new Map<string, string>();
   let dirty = 0;
 
   const totalsOf = (sessionId: string): UsageTotals => {
@@ -139,8 +182,32 @@ export function apply(ctx: Context, config: Config): void {
     const model = (event.data as { message?: { source?: { model?: string } } }).message?.source?.model ?? 'unknown';
     fold(sessions, sessionId, usage, model);
     fold(daily, today(), usage, model);
-    if (++dirty % 4 === 0) store.save(Object.fromEntries(sessions));
+    histories.set(sessionId, [...(histories.get(sessionId) ?? []), stepOf(usage)].slice(-HISTORY_LIMIT));
+    lastModel.set(sessionId, model);
+    if (++dirty % 4 === 0) {
+      store.save(Object.fromEntries(sessions));
+      store.saveHistory(Object.fromEntries(histories));
+      publish();
+    }
   });
+
+  const forecastFor = (sessionId: string | undefined) =>
+    predictNextTurn(sessionId === undefined ? [] : histories.get(sessionId) ?? [], sessionId === undefined ? null : priceFor(config.prices, lastModel.get(sessionId) ?? 'unknown'));
+
+  /** Republish the budget contract every time the meter is flushed — other plugins
+   * read summary.json without knowing session ids. */
+  const publish = (): void => {
+    const id = currentSessionId();
+    const summary = summarise({
+      sessions: [...sessions.values()],
+      today: aggregateToday(),
+      budgetTokens: config.budgetTokens,
+      forecast: id === undefined ? null : forecastFor(id),
+      currency: config.prices[0]?.currency,
+      now: new Date(),
+    });
+    store.saveSummary(summary);
+  };
 
   const currentSessionId = (): string | undefined => {
     try {
@@ -184,12 +251,14 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.commands.register({
     name: 'qm',
-    description: '实时用量仪表：本会话 token/轮次/估算花费，及今日全部会话合计',
+    description: '实时用量仪表：本会话 token/步数/估算花费，及今日全部会话合计',
     handler: () => {
       const lines: string[] = [];
       const id = currentSessionId();
       const current = id !== undefined ? sessions.get(id) : undefined;
       lines.push(renderMeter('▍ 本会话', current ?? emptyTotals(), options()));
+      lines.push('');
+      lines.push(renderForecastLine(current ? forecastFor(id) : null));
       lines.push('');
       lines.push(renderMeter('▍ 今日全部', aggregateToday(), options()));
       if (config.budgetTokens > 0 && current) {
@@ -208,8 +277,12 @@ export function apply(ctx: Context, config: Config): void {
       const count = sessions.size;
       sessions.clear();
       daily.clear();
+      histories.clear();
+      lastModel.clear();
       store.save({});
-      return { kind: 'success', text: `已清零 ${count} 个会话的仪表，从下一轮重新计。` };
+      store.saveHistory({});
+      publish();
+      return { kind: 'success', text: `已清零 ${count} 个会话的仪表，从下一步重新计。` };
     },
   });
 
@@ -226,12 +299,13 @@ export function apply(ctx: Context, config: Config): void {
       presentResult: (_args, _result) => {
         const id = currentSessionId();
         const totals = (id !== undefined ? sessions.get(id) : undefined) ?? emptyTotals();
-        return presentResultCard(totals, options());
+        return presentResultCard(totals, options(), id === undefined ? null : forecastFor(id));
       },
       async execute() {
         const id = currentSessionId();
         const totals = (id !== undefined ? sessions.get(id) : undefined) ?? aggregateAll();
-        return renderMeter('会话实时用量', totals, options());
+        const forecast = id === undefined ? null : forecastFor(id);
+        return renderMeter('会话实时用量', totals, options()) + `\n${renderForecastLine(forecast)}`;
       },
     }),
   );
