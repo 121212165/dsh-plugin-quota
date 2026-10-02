@@ -43,14 +43,15 @@ test('priceFor matches by case-insensitive substring, first row wins', () => {
 
 test('costMicrosOf prices input/output/cacheRead per million; unpriced is 0', () => {
   const micros = costMicrosOf(priceFor(prices, 'space-bunny'), usage);
-  // (12000*1 + 1800*2 + 9000*0.1)/1M = 0.0153 USD = 15300 micros
-  assert.equal(micros, 15_300);
+  // (12000*1 + 1800*2 + 9000*0.1)/1M = 0.0165 USD = 16500 micros
+  assert.equal(micros, 16_500);
   assert.equal(costMicrosOf(null, usage), 0);
   assert.equal(costMicrosOf(priceFor(prices, 'space-bunny'), { inputTokens: Number.NaN }), 0);
 });
 
 test('formatMoney and compactTokens pick human scales', () => {
-  assert.equal(formatMoney(15_300, 'USD'), '0.0153 USD');
+  assert.equal(formatMoney(16_500, 'USD'), '0.017 USD');
+  assert.equal(formatMoney(12_000, 'USD'), '0.012 USD');
   assert.equal(formatMoney(2_500_000, 'CNY'), '2.50 CNY');
   assert.equal(formatMoney(0, 'CNY'), '0');
   assert.equal(compactTokens(999), '999');
@@ -69,11 +70,11 @@ test('gauge clamps and renders the bar', () => {
 
 test('renderMeter shows totals, money, and the budget bar; compact line fits one line', () => {
   const totals = addUsage(emptyTotals(), usage);
-  totals.costMicros = 15_300;
+  totals.costMicros = 16_500;
   const text = renderMeter('▍ 本会话', totals, { budgetTokens: 50_000, prices });
-  assert.ok(text.includes('输入 12k（缓存命中 9k）'), text);
+  assert.ok(text.includes('输入 12k（缓存命中 9.0k）'), text);
   assert.ok(text.includes('输出 1.8k'));
-  assert.ok(text.includes('0.0153 USD'));
+  assert.ok(text.includes('0.017 USD'));
   assert.ok(text.includes('▰'));
   assert.ok(text.includes('14k/50k')); // compactTokens rounds ≥10k to whole k
 
@@ -84,13 +85,13 @@ test('renderMeter shows totals, money, and the budget bar; compact line fits one
 
 test('presentation cards carry the generic contract with a live title', () => {
   const totals = addUsage(emptyTotals(), usage);
-  totals.costMicros = 15_300;
+  totals.costMicros = 16_500;
   const call = presentCallCard('读取实时用量');
-  assert.deepEqual(call, { card: 'generic', title: '读取实时用量', kind: 'quota', rawInput: '读取实时用量' });
+  assert.deepEqual(call, { card: 'generic', title: '读取实时用量', kind: 'other', rawInput: '读取实时用量' });
   const result = presentResultCard(totals, { prices });
   assert.equal(result.card, 'generic');
   assert.equal(result.kind, 'other'); // ToolCallKind enum
   assert.ok(result.title.includes('13.8k tok') || result.title.includes('14k tok'), result.title);
-  assert.ok(result.title.includes('0.0153 USD'));
+  assert.ok(result.title.includes('0.017 USD'));
   assert.ok(result.rawInput.includes('会话实时用量'));
 });

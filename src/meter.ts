@@ -111,12 +111,12 @@ export function renderCompactLine(totals: UsageTotals, options: MeterOptions = {
 }
 
 /** Generic presentation card for the calling state (while the tool runs). */
-export function presentCallCard(title: string): { card: string; title: string; kind: string; rawInput: string } {
+export function presentCallCard(title: string): { card: 'generic'; title: string; kind: 'other'; rawInput: string } {
   return { card: 'generic', title, kind: 'other', rawInput: title };
 }
 
 /** Generic presentation card for the result state. */
-export function presentResultCard(totals: UsageTotals, options: MeterOptions = {}): { card: string; title: string; kind: string; rawInput: string } {
+export function presentResultCard(totals: UsageTotals, options: MeterOptions = {}): { card: 'generic'; title: string; kind: 'other'; rawInput: string } {
   const price = options.prices?.[0];
   const money = totals.costMicros > 0 && price ? ` · ≈${formatMoney(totals.costMicros, price.currency)}` : '';
   return {

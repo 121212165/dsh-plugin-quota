@@ -84,7 +84,8 @@ export function makeHarness(): Harness {
     sections,
     dataPath,
     apply(config: Record<string, unknown>) {
-      applied ??= import('../src/plugin.ts').then(({ apply }) => apply(ctx as never, { enabled: true, dataPath, ...config } as never));
+      // Schema defaults only apply through the host — restate them for direct apply().
+      applied ??= import('../src/plugin.ts').then(({ apply }) => apply(ctx as never, { enabled: true, budgetTokens: 0, inject: true, prices: [], dataPath, ...config } as never));
       return applied;
     },
     command(name: string): CapturedCommand {

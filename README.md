@@ -44,4 +44,4 @@ prices:              # 按模型 id 子串匹配，命中才估花费
 npm run check   # typecheck + node --test + tsc build
 ```
 
-13 个测试：6 纯函数（折算/定价/格式化/gauge/卡片契约）+ 7 装配层（真实 apply() 挂 mock ctx，真实 usage 事件驱动仪表/面板/section/重置）。
+14 个测试：6 纯函数（折算/定价/格式化/gauge/卡片契约）+ 8 装配层（真实 apply() 挂 mock ctx，真实 usage 事件驱动仪表/面板/section/重置）。

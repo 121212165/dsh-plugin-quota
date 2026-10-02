@@ -99,6 +99,9 @@ export function apply(ctx: Context, config: Config): void {
 
   const store = new MeterStore(config.dataPath);
   const sessions = new Map<string, UsageTotals>(Object.entries(store.load()));
+  /** daily rollup keyed YYYY-MM-DD — session ids are uuids without dates, so
+   * "today" cannot be derived by filtering session keys. */
+  const daily = new Map<string, UsageTotals>();
   let dirty = 0;
 
   const totalsOf = (sessionId: string): UsageTotals => {
@@ -117,14 +120,25 @@ export function apply(ctx: Context, config: Config): void {
 
   const today = (): string => new Date().toISOString().slice(0, 10);
 
+  const fold = (map: Map<string, UsageTotals>, key: string, usage: RawUsage, model: string): void => {
+    let totals = map.get(key);
+    if (!totals) {
+      totals = emptyTotals();
+      map.set(key, totals);
+    }
+    const folded = addUsage(totals, usage);
+    folded.costMicros = totals.costMicros + costMicrosOf(priceFor(config.prices, model), usage);
+    map.set(key, folded); // addUsage is pure — store the folded result back
+  };
+
   ctx.on('session/event', (session, event) => {
     if (event.type !== 'assistant/message') return;
     const usage = (event.data as { usage?: RawUsage }).usage;
     if (!usage) return;
     const sessionId = String((session as { id?: unknown }).id ?? 'session');
     const model = (event.data as { message?: { source?: { model?: string } } }).message?.source?.model ?? 'unknown';
-    const totals = addUsage(totalsOf(sessionId), usage);
-    totals.costMicros += costMicrosOf(priceFor(config.prices, model), usage);
+    fold(sessions, sessionId, usage, model);
+    fold(daily, today(), usage, model);
     if (++dirty % 4 === 0) store.save(Object.fromEntries(sessions));
   });
 
@@ -138,10 +152,10 @@ export function apply(ctx: Context, config: Config): void {
     }
   };
 
-  const aggregate = (filter?: (id: string) => boolean): UsageTotals => {
+  const aggregateToday = (): UsageTotals => daily.get(today()) ?? emptyTotals();
+  const aggregateAll = (): UsageTotals => {
     const all = emptyTotals();
-    for (const [id, totals] of sessions) {
-      if (filter && !filter(id)) continue;
+    for (const totals of daily.values()) {
       all.inputTokens += totals.inputTokens;
       all.outputTokens += totals.outputTokens;
       all.cacheReadTokens += totals.cacheReadTokens;
@@ -158,7 +172,7 @@ export function apply(ctx: Context, config: Config): void {
       text: () => {
         try {
           const id = currentSessionId();
-          const totals = id !== undefined && sessions.has(id) ? sessions.get(id)! : aggregate((key) => key.includes(today()));
+          const totals = id !== undefined && sessions.has(id) ? sessions.get(id)! : aggregateToday();
           return totals.turns === 0 ? '' : renderCompactLine(totals, options());
         } catch (error) {
           log.warn(`quota section skipped: ${String(error)}`);
@@ -176,9 +190,8 @@ export function apply(ctx: Context, config: Config): void {
       const id = currentSessionId();
       const current = id !== undefined ? sessions.get(id) : undefined;
       lines.push(renderMeter('▍ 本会话', current ?? emptyTotals(), options()));
-      const dayTotals = aggregate((key) => key.includes(today()));
       lines.push('');
-      lines.push(renderMeter(`▍ 今日全部（${sessions.size} 个会话）`, dayTotals, options()));
+      lines.push(renderMeter('▍ 今日全部', aggregateToday(), options()));
       if (config.budgetTokens > 0 && current) {
         const used = current.inputTokens + current.outputTokens;
         lines.push('');
@@ -194,6 +207,7 @@ export function apply(ctx: Context, config: Config): void {
     handler: () => {
       const count = sessions.size;
       sessions.clear();
+      daily.clear();
       store.save({});
       return { kind: 'success', text: `已清零 ${count} 个会话的仪表，从下一轮重新计。` };
     },
@@ -216,7 +230,7 @@ export function apply(ctx: Context, config: Config): void {
       },
       async execute() {
         const id = currentSessionId();
-        const totals = (id !== undefined ? sessions.get(id) : undefined) ?? aggregate();
+        const totals = (id !== undefined ? sessions.get(id) : undefined) ?? aggregateAll();
         return renderMeter('会话实时用量', totals, options());
       },
     }),
