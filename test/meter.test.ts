@@ -97,10 +97,10 @@ test('presentation cards carry the generic contract with a live title', () => {
   assert.deepEqual(call, { card: 'generic', title: '读取实时用量', kind: 'other', rawInput: '读取实时用量' });
   const result = presentResultCard(totals, { prices });
   assert.equal(result.card, 'generic');
-  assert.equal(result.kind, 'other'); // ToolCallKind enum
   assert.ok(result.title.includes('13.8k tok') || result.title.includes('14k tok'), result.title);
   assert.ok(result.title.includes('0.017 USD'));
-  assert.ok(result.rawInput.includes('会话实时用量'));
+  assert.equal(result.content![0]!.text.includes('会话实时用量'), true, 'a result view carries its body in content');
+  assert.ok(!('rawInput' in result) && !('kind' in result), 'no call-view fields on a result view');
 });
 
 test('stepOf reads one assistant/message step, reasoning counted as output', () => {
@@ -208,7 +208,7 @@ test('the result card carries the forecast into its title and its body', () => {
   const forecast = predictNextTurn([{ input: 1_000, output: 500, cacheRead: 20_000 }], null);
   const withForecast = presentResultCard(totals, { prices }, forecast);
   assert.ok(withForecast.title.includes('下步 ~22k'), withForecast.title);
-  assert.ok(withForecast.rawInput.includes('下步预估'), withForecast.rawInput);
+  assert.ok(withForecast.content![0]!.text.includes('下步预估'), withForecast.content![0]!.text);
   // the old two-argument call still renders exactly as before
   assert.ok(!presentResultCard(totals, { prices }).title.includes('下步'));
 });

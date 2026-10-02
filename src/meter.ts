@@ -236,19 +236,37 @@ export function summarise(input: {
   };
 }
 
+/** These mirror GenericCallView/GenericResultView from @deepseek-ai/dsh-tools with the
+ * fields this plugin always fills in made required — a UI bridge still accepts them
+ * structurally, and callers stop having to unwrap `title?: string` everywhere. */
+export interface CallCard {
+  card: 'generic';
+  title: string;
+  /** the ToolCallKind for a pending call; a result view has no kind */
+  kind: 'other';
+  rawInput: string;
+}
+
+export interface ResultCard {
+  card: 'generic';
+  title: string;
+  content: Array<{ type: 'text'; text: string }>;
+}
+
 /** Generic presentation card for the calling state (while the tool runs). */
-export function presentCallCard(title: string): { card: 'generic'; title: string; kind: 'other'; rawInput: string } {
+export function presentCallCard(title: string): CallCard {
   return { card: 'generic', title, kind: 'other', rawInput: title };
 }
-/** Generic presentation card for the result state. */
-export function presentResultCard(totals: UsageTotals, options: MeterOptions = {}, forecast?: TurnForecast | null): { card: 'generic'; title: string; kind: 'other'; rawInput: string } {
+
+/** Generic presentation card for the result state. A result view has no `kind`
+ * or `rawInput` — those belong to the pending call; the body goes in `content`. */
+export function presentResultCard(totals: UsageTotals, options: MeterOptions = {}, forecast?: TurnForecast | null): ResultCard {
   const price = options.prices?.[0];
   const money = totals.costMicros > 0 && price ? ` · ≈${formatMoney(totals.costMicros, price.currency)}` : '';
   const next = forecast ? ` · 下步 ~${compactTokens(forecast.promptEst)}` : '';
   return {
     card: 'generic',
     title: `${compactTokens(totals.inputTokens + totals.outputTokens)} tok · ${totals.turns} 步${money}${next}`,
-    kind: 'other',
-    rawInput: renderMeter('会话实时用量', totals, options) + (forecast ? `\n${renderForecastLine(forecast)}` : ''),
+    content: [{ type: 'text', text: renderMeter('会话实时用量', totals, options) + (forecast ? `\n${renderForecastLine(forecast)}` : '') }],
   };
 }

@@ -135,8 +135,9 @@ test('the next-turn forecast reaches the panel, the tool, and the published cont
   assert.equal(summary.currency, 'USD', 'money is stated in the row that matched the model');
   assert.deepEqual(JSON.parse(readFileSync(harness.dataPath, 'utf8'))['session-abc'].inputTokens, 46_000);
 
-  const card = (harness.tools[0] as unknown as { presentResult: (a: Record<string, unknown>, r: string) => { title: string } }).presentResult({}, '');
+  const card = (harness.tools[0] as unknown as { presentResult: (a: Record<string, unknown>, r: string) => { title: string; content: Array<{ text: string }> } }).presentResult({}, '');
   assert.ok(card.title.includes('下步 ~30k'), card.title);
+  assert.ok(card.content[0]!.text.includes('下步预估'), card.content[0]!.text);
 });
 
 test('/qm-reset clears the forecast and republishes a cold contract', async () => {
