@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-quota",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "实时用量仪表：会话级 token/轮次/估算花费实时追踪，注入系统提示 + /qm 面板 + quota_meter 卡片；也是家族通用插件开发测试模板（events/commands/tools/section/presentation 全覆盖）。",
   "type": "module",
   "license": "MIT",
