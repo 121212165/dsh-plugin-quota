@@ -376,3 +376,35 @@ export function presentResultCard(totals: UsageTotals, options: MeterOptions = {
     content: [{ type: 'text', text: renderMeter('会话实时用量', totals, options) + (forecast ? `\n${renderForecastLine(forecast)}` : '') }],
   };
 }
+
+/** One billing-log row, as new-api writes it: flat micro-quota for the whole
+ * call, no cache split. */
+export interface BillingRow {
+  model: string;
+  quota: number;
+  tokens: number;
+}
+
+/** Derive real prices from the relay's own billing logs: $/M per model = quota
+ * / 500000 (new-api's $1) / tokens * 1e6, averaged over each model's calls.
+ * These are the numbers the user is ACTUALLY billed, not brochure prices. */
+export function calibratePrices(rows: BillingRow[]): PriceRow[] {
+  const buckets = new Map<string, { billed: number; tokens: number; calls: number }>();
+  for (const row of rows) {
+    if (!row.model || !Number.isFinite(row.quota) || row.quota <= 0 || !Number.isFinite(row.tokens) || row.tokens <= 0) continue;
+    const bucket = buckets.get(row.model) ?? { billed: 0, tokens: 0, calls: 0 };
+    bucket.billed += row.quota;
+    bucket.tokens += row.tokens;
+    bucket.calls += 1;
+    buckets.set(row.model, bucket);
+  }
+  const prices: PriceRow[] = [];
+  for (const [model, bucket] of buckets) {
+    if (bucket.tokens < 1000) continue; // not enough data to be meaningful
+    const usdPerMillion = (bucket.billed / bucket.tokens) * 1e6 / 500_000;
+    if (!Number.isFinite(usdPerMillion) || usdPerMillion <= 0) continue;
+    const rounded = Math.round(usdPerMillion * 100) / 100;
+    prices.push({ match: model, currency: 'USD', perMillion: { input: rounded, output: rounded, cacheRead: rounded } });
+  }
+  return prices.sort((a, b) => a.match.localeCompare(b.match));
+}

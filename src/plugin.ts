@@ -16,12 +16,14 @@ import type { Context } from '@deepseek-ai/cordis';
 import Schema from '@deepseek-ai/schemastery';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type {} from '@deepseek-ai/dsh-commands';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, readFileSync, existsSync, writeFileSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import {
   addUsage,
+  calibratePrices,
   compactTokens,
   costMicrosOf,
   emptyTotals,
@@ -55,12 +57,14 @@ export interface Config {
   budgetTokens: number;
   inject: boolean;
   prices: PriceRow[];
+  billingDbPath?: string;
 }
 
 export const Config = Schema.object({
   enabled: Schema.boolean().default(true),
   dataPath: Schema.string(),
   budgetTokens: Schema.natural().default(0).description('单会话 token 预算，0 = 不显示进度条'),
+  billingDbPath: Schema.string().description('new-api 的 one-api.db 路径；配置后自动从计费日志反推真实 $/M 价格，覆盖 prices'),
   inject: Schema.boolean().default(true).description('把实时仪表注入系统提示'),
   prices: Schema.array(
     Schema.object({
@@ -172,9 +176,25 @@ export function apply(ctx: Context, config: Config): void {
     return totals;
   };
 
+  let calibrated: PriceRow[] = [];
+  if (config.billingDbPath) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const db = new DatabaseSync(expandHome(config.billingDbPath), { readOnly: true });
+      const rows = db
+        .prepare("SELECT model_name, quota, prompt_tokens + completion_tokens AS tokens FROM logs WHERE type = 2 ORDER BY created_at DESC LIMIT 500")
+        .all() as Array<{ model_name: string; quota: number; tokens: number }>;
+      db.close();
+      calibrated = calibratePrices(rows.map((row) => ({ model: row.model_name, quota: Number(row.quota), tokens: Number(row.tokens) })));
+      if (calibrated.length) log.info(`prices calibrated from billing logs: ${calibrated.length} models`);
+    } catch (error) {
+      log.warn(`price calibration skipped: ${String(error)}`);
+    }
+  }
+
   const options = (): { budgetTokens?: number; prices?: PriceRow[] } => ({
     ...(config.budgetTokens > 0 ? { budgetTokens: config.budgetTokens } : {}),
-    ...(config.prices.length ? { prices: config.prices } : {}),
+    ...(calibrated.length ? { prices: calibrated } : config.prices.length ? { prices: config.prices } : {}),
   });
 
   const today = (): string => new Date().toISOString().slice(0, 10);

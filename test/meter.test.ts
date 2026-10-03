@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   addUsage,
+  calibratePrices,
   compactTokens,
   costMicrosOf,
   emptyTotals,
@@ -333,4 +334,20 @@ test('summarise adds the projections without touching the published fields', () 
 
   const cold = summarise({ sessions: [], today: emptyTotals(), budgetTokens: 0, forecast: null });
   assert.deepEqual([cold.contextWindow, cold.stepsUntilFull, cold.stepsUntilBudget], [null, null, null], 'unconfigured publishes null, never a guess');
+});
+
+test('calibratePrices derives real $/M from billing logs and ignores noise', () => {
+  const rows = [
+    { model: 'stealth/space-bunny-alpha', quota: 3_500_000, tokens: 46_308 },
+    { model: 'stealth/space-bunny-alpha', quota: 4_200_000, tokens: 56_000 },
+    { model: 'mystery/model', quota: 500, tokens: 42 },
+    { model: 'garbage', quota: -5, tokens: 100 },
+    { model: 'garbage', quota: 0, tokens: 0 },
+  ];
+  const prices = calibratePrices(rows);
+  assert.equal(prices.length, 1);
+  assert.equal(prices[0]!.match, 'stealth/space-bunny-alpha');
+  const expected = Math.round(((3_500_000 + 4_200_000) / 102_308) * 1e6 / 500_000 * 100) / 100;
+  assert.equal(prices[0]!.perMillion.input, expected);
+  assert.equal(prices[0]!.perMillion.output, expected);
 });
