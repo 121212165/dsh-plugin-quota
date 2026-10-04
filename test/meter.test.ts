@@ -351,3 +351,25 @@ test('calibratePrices derives real $/M from billing logs and ignores noise', () 
   assert.equal(prices[0]!.perMillion.input, expected);
   assert.equal(prices[0]!.perMillion.output, expected);
 });
+
+test('quotaProjection folds assistant/message usage and ignores unrelated events', async () => {
+  const { quotaProjection } = await import('../src/projection.ts');
+  const prices = [{ match: 'space-bunny', currency: 'USD', perMillion: { input: 1, output: 2, cacheRead: 0.1 } }];
+  const projection = quotaProjection(prices);
+  const state = projection.init();
+  const usageEvent = {
+    type: 'assistant/message',
+    data: { usage: { inputTokens: 10_000, outputTokens: 1_000, cacheReadTokens: 5_000 }, message: { source: { provider: 'relay', model: 'stealth/space-bunny-alpha' } } },
+  };
+  const next = projection.apply(state, usageEvent as never);
+  assert.notEqual(next, state); // new reference: the registry sees a change
+  assert.equal(next.turns, 1);
+  assert.equal(next.inputTokens, 10_000);
+  assert.equal(next.costMicros, 12_500); // (10000*1 + 1000*2 + 5000*0.1)/1M
+
+  // unrelated events return the SAME reference (zero downstream work)
+  assert.equal(projection.apply(next, { type: 'user/message' } as never), next);
+  assert.equal(projection.apply(next, { type: 'assistant/message' } as never), next); // no usage
+  // state schema validates the folded state
+  assert.ok(projection.stateSchema.safeParse(next).success);
+});

@@ -20,6 +20,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, readFileSync, existsSync, writeFileSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { quotaProjection, type QuotaState } from './projection.ts';
 
 import {
   addUsage,
@@ -197,6 +198,33 @@ export function apply(ctx: Context, config: Config): void {
     ...(calibrated.length ? { prices: calibrated } : config.prices.length ? { prices: config.prices } : {}),
   });
 
+  // Official projection model: the registry folds committed events eagerly and
+  // replays the log on fork/resume, so per-session totals survive restarts —
+  // the in-memory map below remains only for the daily rollup and as a
+  // fallback when the projection seam is absent.
+  try {
+    (ctx as unknown as { inject?: (services: string[], setup: (sp: { register?: (definition: unknown) => unknown }) => void) => void }).inject?.(
+      ['sessionProjections'],
+      (sp) => {
+        sp.register?.(quotaProjection(config.prices));
+        log.info('quota projection registered');
+      },
+    );
+  } catch (error) {
+    log.warn(`projection registration skipped: ${String(error)}`);
+  }
+
+  const readProjectedState = (): QuotaState | null => {
+    try {
+      const session = (ctx as unknown as { agents?: { currentInitiator?: () => { session?: unknown } | undefined } | undefined }).agents?.currentInitiator?.()?.session;
+      if (!session) return null;
+      const sp = (ctx as unknown as { sessionProjections?: { stateOf?: (session: unknown, key: string) => QuotaState | undefined } | undefined }).sessionProjections;
+      return sp?.stateOf?.(session, 'quota') ?? null;
+    } catch {
+      return null;
+    }
+  };
+
   const today = (): string => new Date().toISOString().slice(0, 10);
 
   const fold = (map: Map<string, UsageTotals>, key: string, usage: RawUsage, model: string): void => {
@@ -300,7 +328,7 @@ export function apply(ctx: Context, config: Config): void {
       text: () => {
         try {
           const id = currentSessionId();
-          const totals = id !== undefined && sessions.has(id) ? sessions.get(id)! : aggregateToday();
+          const totals = readProjectedState() ?? (id !== undefined && sessions.has(id) ? sessions.get(id)! : aggregateToday());
           return totals.turns === 0 ? '' : renderCompactLine(totals, options());
         } catch (error) {
           log.warn(`quota section skipped: ${String(error)}`);
@@ -316,7 +344,7 @@ export function apply(ctx: Context, config: Config): void {
     handler: () => {
       const lines: string[] = [];
       const id = currentSessionId();
-      const current = id !== undefined ? sessions.get(id) : undefined;
+      const current = readProjectedState() ?? (id !== undefined ? sessions.get(id) : undefined);
       lines.push(renderMeter('▍ 本会话', current ?? emptyTotals(), options()));
       lines.push('');
       lines.push(renderForecastLine(current ? forecastFor(id) : null));
@@ -365,7 +393,7 @@ export function apply(ctx: Context, config: Config): void {
       },
       async execute() {
         const id = currentSessionId();
-        const totals = (id !== undefined ? sessions.get(id) : undefined) ?? aggregateAll();
+        const totals = readProjectedState() ?? ((id !== undefined ? sessions.get(id) : undefined) ?? aggregateAll());
         const forecast = id === undefined ? null : forecastFor(id);
         return [renderMeter('会话实时用量', totals, options()), renderForecastLine(forecast), ...projectionLines(id)].join('\n');
       },
