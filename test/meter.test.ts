@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   addUsage,
+  budgetWarningGrade,
   calibratePrices,
   compactTokens,
   costMicrosOf,
@@ -417,4 +418,23 @@ test('quotaProjection keeps stateVersion 1 and folds per-model buckets additivel
   assert.equal(next.byModel['stealth/space-bunny-alpha']!.inputTokens, 15_000);
   assert.equal(next.byModel['deepseek/deepseek-v3']!.inputTokens, 7_000);
   assert.ok(projection.stateSchema.safeParse(next).success);
+});
+
+test('budgetWarningGrade: quiet under 80, heads-up at 80, wrap-up at 100', () => {
+  const budget = 10_000;
+  assert.equal(budgetWarningGrade(7_900, budget), '');
+  assert.equal(budgetWarningGrade(8_000, budget), ' · ⚠ 预算已过 80%，注意收尾');
+  assert.equal(budgetWarningGrade(9_999, budget), ' · ⚠ 预算已过 80%，注意收尾');
+  assert.equal(budgetWarningGrade(10_000, budget), ' · ⚠ 预算已烧穿，强烈建议开新会话');
+  assert.equal(budgetWarningGrade(50_000, budget), ' · ⚠ 预算已烧穿，强烈建议开新会话');
+
+  // no budget (0/undefined) is quiet — nothing to burn through
+  assert.equal(budgetWarningGrade(50_000, 0), '');
+  assert.equal(budgetWarningGrade(50_000, undefined), '');
+
+  // the grades reach the injected line, which stays a single line
+  const totals = { ...emptyTotals(), inputTokens: 9_500, turns: 1 };
+  const line = renderCompactLine(totals, { budgetTokens: budget });
+  assert.ok(line.includes('注意收尾'), line);
+  assert.ok(!line.includes('\n'), line);
 });

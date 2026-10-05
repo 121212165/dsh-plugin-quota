@@ -106,13 +106,25 @@ export function renderMeter(title: string, totals: UsageTotals, options: MeterOp
   return lines.join('\n');
 }
 
+/** Budget warning grades injected after the gauge: 80% is a heads-up, 100%
+ * tells the model to wrap up — the section is the one channel guaranteed to
+ * reach the model every turn, so the nudge rides there. */
+export function budgetWarningGrade(total: number, budgetTokens: number | undefined): string {
+  if (!budgetTokens || budgetTokens <= 0 || !Number.isFinite(budgetTokens)) return '';
+  const ratio = total / budgetTokens;
+  if (ratio >= 1) return ' · ⚠ 预算已烧穿，强烈建议开新会话';
+  if (ratio >= 0.8) return ' · ⚠ 预算已过 80%，注意收尾';
+  return '';
+}
+
 /** One-line live gauge injected into the system prompt every turn. */
 export function renderCompactLine(totals: UsageTotals, options: MeterOptions = {}): string {
   const total = totals.inputTokens + totals.outputTokens;
   const budgetPart = options.budgetTokens && options.budgetTokens > 0 ? ` / ${compactTokens(options.budgetTokens)} ${gauge(total / options.budgetTokens, 8)}` : '';
   const price = options.prices?.[0];
   const money = totals.costMicros > 0 && price ? ` · ≈${formatMoney(totals.costMicros, price.currency)}` : '';
-  return `实时用量：${compactTokens(total)} tok${budgetPart} · ${totals.turns} 步${money}（/qm 详情）`;
+  const warning = budgetWarningGrade(total, options.budgetTokens);
+  return `实时用量：${compactTokens(total)} tok${budgetPart} · ${totals.turns} 步${money}${warning}（/qm 详情）`;
 }
 
 /** Per-model leaderboard for /qm-top: rows sorted by input+output (the same
