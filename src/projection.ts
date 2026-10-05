@@ -6,7 +6,7 @@
 
 import { z } from 'zod';
 
-import { addUsage, costMicrosOf, emptyTotals, priceFor, type PriceRow, type RawUsage } from './meter.ts';
+import { addUsage, costMicrosOf, emptyTotals, priceFor, type PriceRow, type RawUsage, type UsageTotals } from './meter.ts';
 
 export interface QuotaState {
   inputTokens: number;
@@ -14,6 +14,9 @@ export interface QuotaState {
   cacheReadTokens: number;
   turns: number;
   costMicros: number;
+  /** per-model buckets, added for /qm-top. Optional-in/schema-defaulted so old
+   * checkpoints validate unchanged — stateVersion stays 1 and nothing is replayed. */
+  byModel: Record<string, UsageTotals>;
 }
 
 // The state table is merge-extensible by design (official pattern): a
@@ -26,13 +29,15 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
   }
 }
 
-const stateSchema = z.object({
+const totalsSchema = z.object({
   inputTokens: z.number().nonnegative(),
   outputTokens: z.number().nonnegative(),
   cacheReadTokens: z.number().nonnegative(),
   turns: z.number().int().nonnegative(),
   costMicros: z.number().nonnegative(),
 });
+
+const stateSchema = totalsSchema.extend({ byModel: z.record(z.string(), totalsSchema).default({}) });
 
 interface UsageEvent {
   type?: string;
@@ -54,15 +59,19 @@ export type QuotaProjectionDefinition = {
  * and synchronous and returns the same reference for unrelated events. */
 export const quotaProjection = (prices: PriceRow[]): QuotaProjectionDefinition => ({
   key: 'quota',
+  // 1 stays: byModel is schema-defaulted, so pre-byModel checkpoints still validate
   stateVersion: 1,
   stateSchema,
-  init: () => emptyTotals(),
+  init: () => ({ ...emptyTotals(), byModel: {} }),
   apply: (state, event) => {
     if (event?.type !== 'assistant/message') return state;
     const usage = event.data?.usage;
     if (!usage) return state;
     const model = event.data?.message?.source?.model ?? 'unknown';
+    const cost = costMicrosOf(priceFor(prices, model), usage);
     const totals = addUsage(state, usage);
-    return { ...totals, costMicros: totals.costMicros + costMicrosOf(priceFor(prices, model), usage) };
+    const bucket = addUsage(state.byModel[model] ?? emptyTotals(), usage);
+    bucket.costMicros = bucket.costMicros + cost;
+    return { ...totals, costMicros: totals.costMicros + cost, byModel: { ...state.byModel, [model]: bucket } };
   },
 });

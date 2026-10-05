@@ -20,6 +20,7 @@ import {
   renderCompactLine,
   renderForecastLine,
   renderMeter,
+  renderModelTop,
   renderWindowLine,
   stepOf,
   summarise,
@@ -371,5 +372,49 @@ test('quotaProjection folds assistant/message usage and ignores unrelated events
   assert.equal(projection.apply(next, { type: 'user/message' } as never), next);
   assert.equal(projection.apply(next, { type: 'assistant/message' } as never), next); // no usage
   // state schema validates the folded state
+  assert.ok(projection.stateSchema.safeParse(next).success);
+});
+
+test('renderModelTop ranks per-model buckets by used tokens, capped, with money', () => {
+  const byModel = {
+    'stealth/space-bunny-alpha': { ...emptyTotals(), inputTokens: 12_000, outputTokens: 1_500, turns: 3, costMicros: 15_000 },
+    'deepseek/deepseek-v3': { ...emptyTotals(), inputTokens: 40_000, outputTokens: 2_000, turns: 2, costMicros: 96_000 },
+    'mystery/model': { ...emptyTotals(), turns: 0 }, // never ran: excluded
+  };
+  const text = renderModelTop('▍ 今日全部', byModel, { prices }, 5);
+  assert.ok(text.includes('Top 2（共 2 个模型）'), text);
+  const lines = text.split('\n');
+  assert.ok(lines[1]!.startsWith('- deepseek/deepseek-v3'), `biggest model first, got: ${text}`); // 42k > 13.5k
+  assert.ok(text.includes('≈0.096 USD'), text);
+  assert.ok(!text.includes('mystery/model'), text);
+
+  // limit caps the rows; empty map degrades to a plain line instead of a fake zero
+  assert.equal(renderModelTop('▍ 本会话', byModel, { prices }, 1).split('\n').length, 2);
+  assert.match(renderModelTop('▍ 本会话', undefined), /还没有分模型数据/);
+});
+
+test('quotaProjection keeps stateVersion 1 and folds per-model buckets additively', async () => {
+  const { quotaProjection } = await import('../src/projection.ts');
+  const projection = quotaProjection(prices);
+
+  // byModel is a schema-defaulted addition: a pre-byModel checkpoint still validates
+  const legacy = { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, turns: 1, costMicros: 0 };
+  const parsed = projection.stateSchema.parse(legacy);
+  assert.deepEqual(parsed.byModel, {});
+  assert.equal(projection.stateVersion, 1);
+
+  const state = projection.init();
+  const eventFor = (model: string, inputTokens: number) => ({
+    type: 'assistant/message',
+    data: { usage: { inputTokens, outputTokens: 100, cacheReadTokens: 0 }, message: { source: { provider: 'relay', model } } },
+  });
+  let next = projection.apply(state, eventFor('stealth/space-bunny-alpha', 10_000) as never);
+  next = projection.apply(next, eventFor('stealth/space-bunny-alpha', 5_000) as never);
+  next = projection.apply(next, eventFor('deepseek/deepseek-v3', 7_000) as never);
+  assert.equal(next.turns, 3);
+  // buckets accumulate independently from the grand totals
+  assert.equal(next.byModel['stealth/space-bunny-alpha']!.turns, 2);
+  assert.equal(next.byModel['stealth/space-bunny-alpha']!.inputTokens, 15_000);
+  assert.equal(next.byModel['deepseek/deepseek-v3']!.inputTokens, 7_000);
   assert.ok(projection.stateSchema.safeParse(next).success);
 });

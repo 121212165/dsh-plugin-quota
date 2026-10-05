@@ -39,6 +39,7 @@ import {
   renderCompactLine,
   renderForecastLine,
   renderMeter,
+  renderModelTop,
   renderWindowLine,
   stepOf,
   summarise,
@@ -158,20 +159,24 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   const store = new MeterStore(config.dataPath);
-  const sessions = new Map<string, UsageTotals>(Object.entries(store.load()));
+  /** tracked totals carry per-model buckets for /qm-top; files written before
+   * byModel existed simply lack the key, so it stays optional on read. */
+  type TrackedTotals = UsageTotals & { byModel?: Record<string, UsageTotals> };
+  const sessions = new Map<string, TrackedTotals>(Object.entries(store.load()) as Array<[string, TrackedTotals]>);
   /** daily rollup keyed YYYY-MM-DD — session ids are uuids without dates, so
-   * "today" cannot be derived by filtering session keys. */
-  const daily = new Map<string, UsageTotals>();
+   * "today" cannot be derived by filtering session keys. In-memory only:
+   * restarts zero it, a pre-existing behavior /qm-top's 今日 inherits. */
+  const daily = new Map<string, TrackedTotals>();
   /** per-session step history + last-seen model: the basis for the next-turn forecast
    * and for both session projections (fill point, budget burn-out) */
   const histories = new Map<string, StepUsage[]>(Object.entries(store.loadHistory()));
   const lastModel = new Map<string, string>();
   let dirty = 0;
 
-  const totalsOf = (sessionId: string): UsageTotals => {
+  const totalsOf = (sessionId: string): TrackedTotals => {
     let totals = sessions.get(sessionId);
     if (!totals) {
-      totals = emptyTotals();
+      totals = { ...emptyTotals(), byModel: {} };
       sessions.set(sessionId, totals);
     }
     return totals;
@@ -227,15 +232,24 @@ export function apply(ctx: Context, config: Config): void {
 
   const today = (): string => new Date().toISOString().slice(0, 10);
 
-  const fold = (map: Map<string, UsageTotals>, key: string, usage: RawUsage, model: string): void => {
+  /** Three folds stay per-model in lockstep — the projection (per-session state),
+   * this in-memory fold (fallback + daily rollup) — so /qm-top reads the same
+   * buckets no matter which path answered. */
+  const fold = (map: Map<string, TrackedTotals>, key: string, usage: RawUsage, model: string): void => {
     let totals = map.get(key);
     if (!totals) {
-      totals = emptyTotals();
+      totals = { ...emptyTotals(), byModel: {} };
       map.set(key, totals);
     }
+    const cost = costMicrosOf(priceFor(config.prices, model), usage);
     const folded = addUsage(totals, usage);
-    folded.costMicros = totals.costMicros + costMicrosOf(priceFor(config.prices, model), usage);
-    map.set(key, folded); // addUsage is pure — store the folded result back
+    folded.costMicros = totals.costMicros + cost;
+    const buckets = { ...(totals.byModel ?? {}) };
+    const bucket = addUsage(buckets[model] ?? emptyTotals(), usage);
+    bucket.costMicros = bucket.costMicros + cost;
+    buckets[model] = bucket;
+    (folded as TrackedTotals).byModel = buckets;
+    map.set(key, folded as TrackedTotals); // addUsage is pure — store the folded result back
   };
 
   ctx.on('session/event', (session, event) => {
@@ -357,6 +371,24 @@ export function apply(ctx: Context, config: Config): void {
         lines.push(used > config.budgetTokens ? `⚠ 已超出单会话预算 ${compactTokens(config.budgetTokens)}——收尾或 /qm-reset` : '');
       }
       return { kind: 'success', text: lines.filter((line) => line !== '').join('\n') };
+    },
+  });
+
+  ctx.commands.register({
+    name: 'qm-top',
+    description: '按模型用量排行：本会话与今日全部会话的分模型 Top5（/qm-top）',
+    handler: () => {
+      try {
+        const id = currentSessionId();
+        const current = readProjectedState() ?? (id !== undefined ? sessions.get(id) : undefined);
+        const todayTotals = daily.get(today());
+        return {
+          kind: 'success',
+          text: [renderModelTop('▍ 本会话', current?.byModel, options()), '', renderModelTop('▍ 今日全部', todayTotals?.byModel, options())].join('\n'),
+        };
+      } catch (error) {
+        return { kind: 'error', text: `/qm-top 内部出错：${String(error)}` };
+      }
     },
   });
 

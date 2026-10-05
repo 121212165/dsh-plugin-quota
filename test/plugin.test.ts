@@ -27,11 +27,11 @@ test('bad config fails loud naming quota; disabled mounts nothing', async () => 
   assert.equal(off.commands.length, 0);
 });
 
-test('apply wires two commands, the quota_meter tool, and the live section', async () => {
+test('apply wires three commands, the quota_meter tool, and the live section', async () => {
   const harness = await mounted();
   assert.deepEqual(
     harness.commands.map((command) => command.name).sort(),
-    ['qm', 'qm-reset'],
+    ['qm', 'qm-reset', 'qm-top'],
   );
   assert.equal(harness.tool('quota_meter').name, 'quota_meter');
   assert.equal(harness.sectionText(), ''); // no usage yet
@@ -188,7 +188,7 @@ test('a non-positive or non-finite prices[].contextWindow fails startup naming q
     await assert.rejects(bad.apply({ prices: [{ ...prices[0]!, contextWindow }] }), /quota: prices\[\]\.contextWindow/);
   }
   const ok = await mounted({ prices: windowedPrices });
-  assert.equal(ok.commands.length, 2, 'a sane contextWindow mounts normally');
+  assert.equal(ok.commands.length, 3, 'a sane contextWindow mounts normally');
 });
 
 test('/qm projects the fill point and the budget burn-out under the forecast line', async () => {
@@ -279,4 +279,30 @@ test('the injected section stays byte-identical while the projections grow', asy
   const section = harness.sectionText();
   assert.equal(section.split('\n').length, 1);
   assert.ok(!section.includes('撑满') && !section.includes('预算预测'));
+});
+
+test('/qm-top ranks models for the current session and for today, both fold paths agreeing', async () => {
+  const harness = await mounted();
+  harness.emitUsage('session-abc', 'stealth/space-bunny-alpha', { inputTokens: 10_000, outputTokens: 1_000, cacheReadTokens: 0 });
+  harness.emitUsage('session-abc', 'deepseek/deepseek-v3', { inputTokens: 40_000, outputTokens: 2_000, cacheReadTokens: 0 });
+  harness.emitUsage('session-xyz', 'stealth/space-bunny-alpha', { inputTokens: 1_000, outputTokens: 100, cacheReadTokens: 0 });
+  harness.setCurrentSession('session-abc');
+
+  const text = harness.command('qm-top').handler({}).text;
+  // current session: deepseek leads on used tokens; today also carries the other session
+  assert.ok(text.includes('▍ 本会话'), text);
+  assert.ok(text.includes('- deepseek/deepseek-v3'), text);
+  assert.ok(text.includes('- stealth/space-bunny-alpha'), text);
+  assert.ok(text.includes('▍ 今日全部'), text);
+  const todayPart = text.split('▍ 今日全部')[1]!;
+  assert.ok(todayPart.includes('- deepseek/deepseek-v3'), todayPart); // 42k, today's biggest
+  assert.ok(todayPart.includes('stealth/space-bunny-alpha'), todayPart); // 11k + 1.1k across sessions
+  assert.ok(text.includes('USD'), text); // priced models show money
+});
+
+test('/qm-top degrades to a plain line when nothing has run yet', async () => {
+  const harness = await mounted();
+  harness.setCurrentSession('session-abc');
+  const text = harness.command('qm-top').handler({}).text;
+  assert.match(text, /还没有分模型数据/);
 });

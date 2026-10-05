@@ -115,6 +115,22 @@ export function renderCompactLine(totals: UsageTotals, options: MeterOptions = {
   return `实时用量：${compactTokens(total)} tok${budgetPart} · ${totals.turns} 步${money}（/qm 详情）`;
 }
 
+/** Per-model leaderboard for /qm-top: rows sorted by input+output (the same
+ * "used" figure the gauges show), capped at `limit`. Empty map renders a plain
+ * "no data" line — a leaderboard over nothing must not look like a zero row. */
+export function renderModelTop(title: string, byModel: Record<string, UsageTotals> | undefined, options: MeterOptions = {}, limit = 5): string {
+  const entries = Object.entries(byModel ?? {}).filter(([, totals]) => totals.turns > 0);
+  if (!entries.length) return `${title}：还没有分模型数据（跑一步后再看）`;
+  entries.sort((a, b) => b[1].inputTokens + b[1].outputTokens - (a[1].inputTokens + a[1].outputTokens));
+  const currency = options.prices?.[0]?.currency;
+  const lines = [`${title} 按模型 Top ${Math.min(limit, entries.length)}（共 ${entries.length} 个模型）`];
+  for (const [model, totals] of entries.slice(0, limit)) {
+    const money = totals.costMicros > 0 && currency ? ` · ≈${formatMoney(totals.costMicros, currency)}` : '';
+    lines.push(`- ${model}：${compactTokens(totals.inputTokens + totals.outputTokens)} tok · ${totals.turns} 步${money}`);
+  }
+  return lines.join('\n');
+}
+
 /** One `assistant/message` step. dsh emits these per *step*, not per user turn:
  * `input` is the uncached prefix delta, `cacheRead` the reused prefix. */
 export interface StepUsage {
