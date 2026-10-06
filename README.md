@@ -1,5 +1,19 @@
 # dsh-plugin-quota
 
+<div align="center">
+
+**实时用量仪表 + 下一步预估 + 预算刹车** —— 每回合给模型一行实时 token/花费仪表，预算与上下文撑满都可预测；模型自己看得见，自己刹
+
+[![GitHub stars](https://img.shields.io/github/stars/121212165/dsh-plugin-quota?style=social)](https://github.com/121212165/dsh-plugin-quota/stargazers) [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![tests](https://img.shields.io/badge/tests-node%20--test%20passing-brightgreen)]()
+
+**60 秒上手**：`dsh plugin --profile web add github:121212165/dsh-plugin-quota` → 重启 dsh → 对话里输入 `/qm`（**零配置即用**，配 `prices` 才估钱、配 `budgetTokens` 才有进度条）
+
+<!-- 截图版位：/qm 面板与实时仪表行 web UI 实拍截图 / GIF（待补） -->
+
+</div>
+
+> 🧩 **dsh 插件家族**（22 件）：总目录 **[dsh-plugin-family](https://github.com/121212165/dsh-plugin-family)** ｜ 兄弟插件：**[ide-hub](https://github.com/121212165/dsh-plugin-ide-hub)** 跨 IDE 统一管理 · **[task-forge](https://github.com/121212165/dsh-plugin-task-forge)** 跨窗口无损交接
+
 dsh 插件：**实时用量仪表**——本会话 token/步数/估算花费实时追踪，并给出**下一步预估**与**会话窗口消耗预测**（第几步撑满上下文、第几步烧完预算）；同时是 dsh 插件家族的**通用插件开发测试模板**。
 
 ## 它做什么
@@ -34,8 +48,10 @@ dsh 插件：**实时用量仪表**——本会话 token/步数/估算花费实�
 ## 安装
 
 ```bash
-dsh plugin --profile <你的profile> add <本仓库克隆路径>
+dsh plugin --profile <你的profile> add github:121212165/dsh-plugin-quota
 ```
+
+重启 dsh 即用（默认配置就能工作：仪表注入 + `/qm` 面板）。需要预算进度条或估花费时，把本仓库根目录 `cordis.patch.yml` 里的 `budgetTokens` / `prices` 示例**并进** profile 的 `cordis.patch.yml`（并进同一个 YAML 数组，不要另起文档追加）。price-aware 是官方面向宿主侧的参考实现，与本插件用 `accounting: own|assume-price-aware` 共存，不冲突。
 
 ## 配置
 
