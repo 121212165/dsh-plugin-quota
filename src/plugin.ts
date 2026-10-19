@@ -173,15 +173,6 @@ export function apply(ctx: Context, config: Config): void {
   const lastModel = new Map<string, string>();
   let dirty = 0;
 
-  const totalsOf = (sessionId: string): TrackedTotals => {
-    let totals = sessions.get(sessionId);
-    if (!totals) {
-      totals = { ...emptyTotals(), byModel: {} };
-      sessions.set(sessionId, totals);
-    }
-    return totals;
-  };
-
   let calibrated: PriceRow[] = [];
   if (config.billingDbPath) {
     try {

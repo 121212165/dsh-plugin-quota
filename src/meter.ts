@@ -90,8 +90,6 @@ export interface MeterOptions {
   now?: Date;
 }
 
-const CURRENCY_FALLBACK = '$';
-
 /** Full panel for /qm and the quota_meter tool: per-session gauge + totals. */
 export function renderMeter(title: string, totals: UsageTotals, options: MeterOptions = {}): string {
   const lines = [`${title}`];
@@ -345,7 +343,7 @@ export function summarise(input: {
   today: UsageTotals;
   budgetTokens: number;
   forecast: TurnForecast | null;
-  currency?: string;
+  currency?: string | undefined;
   now?: Date;
   contextWindow?: number | null;
   stepsUntilFull?: number | null;
