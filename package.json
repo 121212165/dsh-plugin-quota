@@ -37,7 +37,8 @@
     "prepare": "npm run build",
     "test": "node --test \"test/*.test.ts\"",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run typecheck && npm test && npm run build",
+    "prepublishOnly": "npm run check"
   },
   "keywords": [
     "dsh",
@@ -47,7 +48,8 @@
     "quota",
     "tokens",
     "meter",
-    "realtime"
+    "realtime",
+    "dsh-plugin"
   ],
   "repository": {
     "type": "git",

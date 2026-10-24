@@ -1,0 +1,4 @@
+export { name, Config, apply, inject, expandHome, MeterStore } from './plugin.ts';
+export type { Config as QuotaConfig } from './plugin.ts';
+export { addUsage, compactTokens, costMicrosOf, emptyTotals, formatMoney, gauge, percentile, predictNextTurn, presentCallCard, presentResultCard, priceFor, projectBudget, projectWindow, promptGrowth, renderBudgetLine, renderCompactLine, renderForecastLine, renderMeter, renderWindowLine, stepOf, summarise, TOOL_SLACK, type BudgetProjection, type CallCard, type MeterOptions, type ResultCard, type PriceRow, type QuotaSummary, type RawUsage, type StepUsage, type TurnForecast, type UsageTotals, type WindowProjection, } from './meter.ts';
+//# sourceMappingURL=index.d.ts.map
