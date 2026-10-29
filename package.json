@@ -27,6 +27,15 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "catalog": {
+      "category": "钱与用量",
+      "blurb": "实时用量仪表 + 下一步预估 + 撑满/预算双预测",
+      "entries": "`/qm`",
+      "featured": true,
+      "featuredOrder": 3,
+      "featuredBlurb": "实时用量仪表 + 下一步预估 + 预算刹车：每回合给模型一行实时 token/花费仪表，模型自己看得见、自己刹",
+      "featuredEntries": "`/qm` `/qm-top` `quota_meter` 工具"
     }
   },
   "engines": {
