@@ -1,13 +1,13 @@
 /** Assembly-layer harness for quota: a scripted mock dsh context mounting the
  * real apply(), with the session/event listener captured so tests can drive
  * real usage events and watch the meter, the section, and the cards update.
- * Template ported from dsh-plugin-task-forge (methodology: dsh-auto-review).
+ * The mock itself lives in @dsh-family/kit; this file only adds quota's
+ * captures and event shape.
  * @module test/harness */
 
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after } from 'node:test';
+
+import { applyOnce, createMockCtx, tempDir } from '@dsh-family/kit/kit/test-harness';
 
 export interface CapturedCommand {
   name: string;
@@ -38,75 +38,51 @@ export interface Harness {
 }
 
 export function makeHarness(): Harness {
-  const commands: CapturedCommand[] = [];
-  const tools: CapturedTool[] = [];
-  const sections: CapturedSection[] = [];
   let currentSession: string | undefined;
 
-  const ctx = {
-    logger(_name: string) {
-      return { info() {}, warn() {}, debug() {} };
-    },
-    on(event: string, callback: (session: unknown, event: unknown) => void) {
-      listeners.push({ event, callback });
-    },
-    commands: {
-      register(definition: CapturedCommand) {
-        commands.push(definition);
-      },
-    },
-    tools: {
-      register(definition: CapturedTool) {
-        tools.push(definition);
-      },
-    },
-    systemPrompt: {
-      section(section: CapturedSection) {
-        sections.push(section);
-      },
-    },
+  const mock = createMockCtx<CapturedCommand, CapturedTool, CapturedSection>({
     agents: {
       currentInitiator() {
         return currentSession === undefined ? undefined : { session: { id: currentSession } };
       },
     },
-  };
-  const listeners: { event: string; callback: (session: unknown, event: unknown) => void }[] = [];
+  });
 
-  const dataPath = join(mkdtempSync(join(tmpdir(), 'quota-wire-')), 'totals.json');
-  after(() => rmSync(join(dataPath, '..'), { recursive: true, force: true }));
+  const dataPath = join(tempDir('quota-wire-'), 'totals.json');
 
-  let applied: Promise<void> | null = null;
+  // Schema defaults only apply through the host — restate them for direct apply().
+  // The first apply() call decides the mount config; later calls reuse it.
+  let pending: Record<string, unknown> = {};
+  let mounted = false;
+  const apply = applyOnce(() =>
+    import('../src/plugin.ts').then(({ apply }) =>
+      apply(mock.ctx as never, { enabled: true, budgetTokens: 0, inject: true, prices: [], dataPath, ...pending } as never),
+    ),
+  );
 
-  const harness: Harness = {
-    commands,
-    tools,
-    sections,
+  return {
+    commands: mock.commands,
+    tools: mock.tools,
+    sections: mock.sections,
     dataPath,
     apply(config: Record<string, unknown>) {
-      // Schema defaults only apply through the host — restate them for direct apply().
-      applied ??= import('../src/plugin.ts').then(({ apply }) => apply(ctx as never, { enabled: true, budgetTokens: 0, inject: true, prices: [], dataPath, ...config } as never));
-      return applied;
+      if (!mounted) {
+        mounted = true;
+        pending = config;
+      }
+      return apply();
     },
-    command(name: string): CapturedCommand {
-      const found = commands.find((candidate) => candidate.name === name);
-      if (!found) throw new Error(`command ${name} was never registered`);
-      return found;
-    },
-    tool(name: string): CapturedTool {
-      const found = tools.find((candidate) => candidate.name === name);
-      if (!found) throw new Error(`tool ${name} was never registered`);
-      return found;
-    },
+    command: mock.command,
+    tool: mock.tool,
     sectionText(): string {
-      const found = sections.find((candidate) => candidate.name === 'quota');
-      if (!found) throw new Error('quota section was never registered');
-      return found.text();
+      return mock.section('quota').text();
     },
     emitUsage(sessionId: string, model: string, usage: Record<string, number>): void {
-      const listener = listeners.find((candidate) => candidate.event === 'session/event');
-      if (!listener) throw new Error('session/event listener was never registered');
-      listener.callback(
+      const callback = mock.listener('session/event').callback as unknown as (
+        session: unknown,
+        event: unknown,
+      ) => void;
+      callback(
         { id: sessionId },
         { type: 'assistant/message', data: { usage, message: { source: { provider: 'relay', model } } } },
       );
@@ -115,5 +91,4 @@ export function makeHarness(): Harness {
       currentSession = sessionId;
     },
   };
-  return harness;
 }

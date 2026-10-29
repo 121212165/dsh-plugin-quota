@@ -67,6 +67,7 @@
   "sideEffects": false,
   "icon": "./icon.svg",
   "devDependencies": {
+    "@dsh-family/kit": "github:121212165/dsh-plugin-kit#v0.2.1",
     "@deepseek-ai/cordis": "4.0.2",
     "@deepseek-ai/dsh-agent": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-base": "^0.1.2-alpha.4",
