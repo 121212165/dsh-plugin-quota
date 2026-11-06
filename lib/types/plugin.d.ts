@@ -25,12 +25,12 @@ export interface Config {
     prices: PriceRow[];
     billingDbPath?: string;
 }
-export declare const Config: Schema<Schemastery.ObjectS<{
-    enabled: Schema<boolean, boolean>;
-    dataPath: Schema<string, string>;
-    budgetTokens: Schema<number, number>;
-    billingDbPath: Schema<string, string>;
-    inject: Schema<boolean, boolean>;
+export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
+    enabled: Schema<boolean, boolean, "defined">;
+    dataPath: Schema<string, string, "plain">;
+    budgetTokens: Schema<number, number, "defined">;
+    billingDbPath: Schema<string, string, "plain">;
+    inject: Schema<boolean, boolean, "defined">;
     prices: Schema<({
         match?: string | null;
         currency?: string | null;
@@ -40,26 +40,26 @@ export declare const Config: Schema<Schemastery.ObjectS<{
             cacheRead?: number | null;
         } & import("@deepseek-ai/cosmokit").Dict) | null;
         contextWindow?: number | null;
-    } & import("@deepseek-ai/cosmokit").Dict)[], Schemastery.ObjectT<{
-        match: Schema<string, string>;
-        currency: Schema<string, string>;
-        perMillion: Schema<Schemastery.ObjectS<{
-            input: Schema<number, number>;
-            output: Schema<number, number>;
-            cacheRead: Schema<number, number>;
-        }>, Schemastery.ObjectT<{
-            input: Schema<number, number>;
-            output: Schema<number, number>;
-            cacheRead: Schema<number, number>;
-        }>>;
-        contextWindow: Schema<number, number>;
-    }>[]>;
-}>, Schemastery.ObjectT<{
-    enabled: Schema<boolean, boolean>;
-    dataPath: Schema<string, string>;
-    budgetTokens: Schema<number, number>;
-    billingDbPath: Schema<string, string>;
-    inject: Schema<boolean, boolean>;
+    } & import("@deepseek-ai/cosmokit").Dict)[], Schemastery.ObjectT<NoInfer<{
+        match: Schema<string, string, "plain">;
+        currency: Schema<string, string, "defined">;
+        perMillion: Schema<Schemastery.ObjectS<NoInfer<{
+            input: Schema<number, number, "defined">;
+            output: Schema<number, number, "defined">;
+            cacheRead: Schema<number, number, "defined">;
+        }>>, Schemastery.ObjectT<NoInfer<{
+            input: Schema<number, number, "defined">;
+            output: Schema<number, number, "defined">;
+            cacheRead: Schema<number, number, "defined">;
+        }>>, "plain">;
+        contextWindow: Schema<number, number, "plain">;
+    }>>[], "defined">;
+}>>, Schemastery.ObjectT<NoInfer<{
+    enabled: Schema<boolean, boolean, "defined">;
+    dataPath: Schema<string, string, "plain">;
+    budgetTokens: Schema<number, number, "defined">;
+    billingDbPath: Schema<string, string, "plain">;
+    inject: Schema<boolean, boolean, "defined">;
     prices: Schema<({
         match?: string | null;
         currency?: string | null;
@@ -69,21 +69,21 @@ export declare const Config: Schema<Schemastery.ObjectS<{
             cacheRead?: number | null;
         } & import("@deepseek-ai/cosmokit").Dict) | null;
         contextWindow?: number | null;
-    } & import("@deepseek-ai/cosmokit").Dict)[], Schemastery.ObjectT<{
-        match: Schema<string, string>;
-        currency: Schema<string, string>;
-        perMillion: Schema<Schemastery.ObjectS<{
-            input: Schema<number, number>;
-            output: Schema<number, number>;
-            cacheRead: Schema<number, number>;
-        }>, Schemastery.ObjectT<{
-            input: Schema<number, number>;
-            output: Schema<number, number>;
-            cacheRead: Schema<number, number>;
-        }>>;
-        contextWindow: Schema<number, number>;
-    }>[]>;
-}>>;
+    } & import("@deepseek-ai/cosmokit").Dict)[], Schemastery.ObjectT<NoInfer<{
+        match: Schema<string, string, "plain">;
+        currency: Schema<string, string, "defined">;
+        perMillion: Schema<Schemastery.ObjectS<NoInfer<{
+            input: Schema<number, number, "defined">;
+            output: Schema<number, number, "defined">;
+            cacheRead: Schema<number, number, "defined">;
+        }>>, Schemastery.ObjectT<NoInfer<{
+            input: Schema<number, number, "defined">;
+            output: Schema<number, number, "defined">;
+            cacheRead: Schema<number, number, "defined">;
+        }>>, "plain">;
+        contextWindow: Schema<number, number, "plain">;
+    }>>[], "defined">;
+}>>, "plain">;
 export declare function expandHome(path: string): string;
 export declare class MeterStore {
     readonly path: string;
